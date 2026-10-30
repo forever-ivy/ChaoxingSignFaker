@@ -1,5 +1,2 @@
-node_modules/
-*.jpg
-*.png
-shade.jpg
-cutout.png
+release/
+package-lock.json

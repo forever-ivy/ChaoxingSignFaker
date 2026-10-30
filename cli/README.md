@@ -10,6 +10,22 @@ cd "$(dirname "$0")" && npm test
 
 环境变量:`CXSIGN_PHONE` / `CXSIGN_PASSWORD` / `CXSIGN_HOME` / `CXSIGN_JSON` / `CXSIGN_TIMEOUT_MS` / `CXSIGN_RETRIES` / `CXSIGN_VERBOSE` / `CXSIGN_AS` / `CXSIGN_ORT_MODEL`。
 
+
+## 下载安装
+
+预编译版本见 [Releases](https://github.com/forever-ivy/ChaoxingSignFaker/releases/tag/cli-v1.0.0)。
+
+```bash
+# 独立可执行文件(无需 Node):linux-x64 / darwin-arm64 / darwin-x64 / windows-x64.exe
+curl -L -o cxsign https://github.com/forever-ivy/ChaoxingSignFaker/releases/download/cli-v1.0.0/cxsign-v1.0.0-linux-x64 && chmod +x cxsign && ./cxsign --version
+# 或单文件(Node >= 20)
+curl -LO https://github.com/forever-ivy/ChaoxingSignFaker/releases/download/cli-v1.0.0/cxsign.mjs && node cxsign.mjs --help
+# 或完整压缩包(含二维码图片识别依赖和滑块模型)
+curl -LO https://github.com/forever-ivy/ChaoxingSignFaker/releases/download/cli-v1.0.0/cxsign-cli-v1.0.0.tar.gz && tar xzf cxsign-cli-v1.0.0.tar.gz && cxsign-cli-v1.0.0/bin/cxsign --help
+```
+
+校验:`sha256sum -c SHA256SUMS`。重新打包:`cli/scripts/release.sh`。
+
 ## 位置与地图选点
 
 ```bash
