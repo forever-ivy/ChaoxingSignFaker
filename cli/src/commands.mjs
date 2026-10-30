@@ -10,7 +10,7 @@ import { Client, selfClient, otherClient, resolveClient, ensureUser, applyClient
 import { CookieSession, checkResponse, request } from "./http.mjs"
 import * as api from "./api.mjs"
 import * as geo from "./geo.mjs"
-import { watchIM } from "./imwatch.mjs"
+import { watchIM, scanGroups, courseIndex } from "./imwatch.mjs"
 import { captchaModelStatus, predictSliderXOffset, decodeQRCodeImage } from "./image.mjs"
 import { createRequire } from "node:module"
 const _req = createRequire(import.meta.url)
@@ -695,13 +695,51 @@ export const COMMANDS = [
   },
 
   {
-    name: "im groups", summary: "列出环信课程群聊", auth: true, paged: true,
+    name: "im groups", summary: "列出环信课程群聊,含最近活动时间和 im watch 是否会监听", auth: true, paged: true,
+    args: [n("active-days", "最近多少天内有消息/签到才算活跃", { default: api.DEFAULT_ACTIVE_DAYS }), b("all", "按 --all 规则评估"), b("no-scan", "不拉取消息,只列群")],
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const im = await api.getEasemobConfig(c)
-        return api.getEasemobGroups(im)
+        const groups = await api.getEasemobGroups(im)
+        if (ctx.args["no-scan"]) return groups
+        const st = load()
+        let courses = {}
+        try { courses = courseIndex(await api.getAllCourses(c)) } catch {}
+        const activity = await scanGroups(im, groups, { fetchMessages: (i, g) => api.fetchGroupMessages(i, g) })
+        return api.classifyGroups(groups, { activity, courses, activeDays: ctx.args["active-days"] ?? api.DEFAULT_ACTIVE_DAYS, isAll: !!ctx.args.all, muted: st.imMutedGroups ?? [], pinned: st.imPinnedGroups ?? [] })
+          .map((g) => ({ groupId: g.groupId, name: g.name, lastActivity: g.lastActivity, recentMessages: activity[String(g.groupId)]?.messageCount ?? null, isCourseEnded: g.isCourseEnded, isWatched: g.isWatched, reason: g.reason, imageUrl: g.imageUrl }))
+          .sort((x, y) => (y.lastActivity ?? "").localeCompare(x.lastActivity ?? ""))
       })
     },
+  },
+  {
+    name: "im mute", summary: "im watch 永久不监听某个群(排除列表)", auth: false, sideEffect: true,
+    args: [s("group", "群 ID", { required: true })],
+    plan: (ctx) => ({ group: ctx.args.group, mutedNow: load().imMutedGroups ?? [] }),
+    async run(ctx) {
+      const st = load(); const id = String(ctx.args.group)
+      st.imMutedGroups = [...new Set([...(st.imMutedGroups ?? []), id])]
+      st.imPinnedGroups = (st.imPinnedGroups ?? []).filter((x) => x !== id)
+      markDirty()
+      return { muted: st.imMutedGroups, pinned: st.imPinnedGroups }
+    },
+  },
+  {
+    name: "im unmute", summary: "取消排除;加 --pin 则无论是否活跃都监听(包含列表)", auth: false, sideEffect: true,
+    args: [s("group", "群 ID", { required: true }), b("pin", "加入包含列表,始终监听")],
+    plan: (ctx) => ({ group: ctx.args.group, pin: !!ctx.args.pin }),
+    async run(ctx) {
+      const st = load(); const id = String(ctx.args.group)
+      st.imMutedGroups = (st.imMutedGroups ?? []).filter((x) => x !== id)
+      if (ctx.args.pin) st.imPinnedGroups = [...new Set([...(st.imPinnedGroups ?? []), id])]
+      else st.imPinnedGroups = (st.imPinnedGroups ?? []).filter((x) => x !== id)
+      markDirty()
+      return { muted: st.imMutedGroups, pinned: st.imPinnedGroups }
+    },
+  },
+  {
+    name: "im lists", summary: "查看 im watch 的排除/包含列表", auth: false,
+    async run() { const st = load(); return { muted: st.imMutedGroups ?? [], pinned: st.imPinnedGroups ?? [] } },
   },
   {
     name: "im signs", summary: "从群聊历史消息里发现签到活动", auth: true, paged: true,
@@ -726,13 +764,15 @@ export const COMMANDS = [
   {
     name: "im watch", summary: "常驻监听群聊里新发布的签到(NDJSON 事件流)", auth: true, stream: true,
     args: [n("interval", "轮询间隔秒", { default: 15 }), n("timeout", "运行多少秒后退出(默认一直运行;此命令里 --timeout 单位是秒,HTTP 超时改用 CXSIGN_TIMEOUT_MS)"), b("once", "收到第一个新签到事件后退出"),
-      b("include-existing", "启动时把已有的签到也作为事件输出"), s("group", "只监听某个群 ID"), n("max-groups", "最多监听几个群", { default: 50 }),
+      b("include-existing", "启动时把已有的签到也作为事件输出"), s("group", "强制只监听这些群 ID(逗号分隔,忽略活跃度和排除列表)"),
+      n("active-days", "只监听最近 N 天内有消息/签到的群", { default: api.DEFAULT_ACTIVE_DAYS }), b("all", "不按活跃度过滤(排除列表仍生效)"), n("rescan-minutes", "多久重新评估一次活跃群", { default: 60 }),
       s("notify-cmd", "每个事件执行的命令(事件 JSON 通过 stdin 和 CXSIGN_EVENT 环境变量传入)"),
       b("auto-sign", "收到事件后自动签到(必须同时 --confirm,默认关闭;位置签到用活动设置的位置)")],
     async run(ctx) {
       if (ctx.args["auto-sign"] && !ctx.global?.confirm) throw usage("--auto-sign 必须同时加 --confirm 才会生效", { hint: "默认只监听不签到" })
       const c = await clientOf(ctx)
-      return watchIM(ctx, c, { autoSign: ctx.args["auto-sign"] && ctx.global?.confirm ? (ev) => autoSignEvent(ctx, ev) : null })
+      const st = load()
+      return watchIM(ctx, c, { lists: { muted: st.imMutedGroups ?? [], pinned: st.imPinnedGroups ?? [] }, autoSign: ctx.args["auto-sign"] && ctx.global?.confirm ? (ev) => autoSignEvent(ctx, ev) : null })
     },
   },
   {

@@ -54,7 +54,7 @@ cd cli && npm install          # 装 onnxruntime-node / jsqr / jpeg-js / pngjs
 | 云盘上传 | `cloud upload --file` |
 | 人脸 | `face profile` · `face list` · `face add` · `face remove` |
 | 课表 | `schedule refresh` · `schedule list` · `schedule current` · `schedule recommend` |
-| 群聊签到发现 / 实时监听 | `im groups` · `im signs` · `im watch` |
+| 群聊签到发现 / 实时监听 | `im groups` · `im signs` · `im watch` · `im mute` · `im unmute [--pin]` · `im lists` |
 | 代签用户 | `users list` · `users add` · `users import` · `users share --out` · `users remove` · `users relogin` · `users tag` |
 | 收藏位置 / 地图选点 | `locations list` · `locations add [--search]` · `locations remove` · `locations remember` · `locations search` · `locations reverse` · `locations convert` |
 | 设备码 | `device-code show` · `device-code reset` |
@@ -77,6 +77,11 @@ cd cli && npm install          # 装 onnxruntime-node / jsqr / jpeg-js / pngjs
 ## 群聊实时监听 `im watch`
 
 - 用 App 同样的环信 token 接口登录,周期拉取各课程群的 messageroaming(默认 15 秒,`--interval`),解析签到附件,**每个新签到输出一行 NDJSON** `{"type":"sign",...}`;另有 `connected`/`ready`/`disconnected`/`reconnected`/`stopped` 事件。断线指数退避重连(2s 起,最长 5 分钟),401 自动重取 token。
+- **只监听活跃群**(默认):启动时并发扫描全部群的最近漫游消息,最近 `--active-days`(默认 30)天内有消息或签到的群才轮询;课程列表里 `state=1`(已结课)或 `isFiled=1`(归档)的课程群(按 `chatid` 对应)直接跳过;扫描失败的群保守地先监听。每 `--rescan-minutes`(默认 60)分钟重新评估,新活跃的群会被加入(`rescan` 事件里的 `added`)。
+  - 环信群列表接口不返回加入时间,所以用"最近消息时间"判断。漫游接口每次固定返回最近 50 条,无法再缩小;轮询时只解析比上次游标新的消息,并发请求。
+  - 实测 43 个群:6 个最近 7 天内有消息,33 个漫游里没有任何消息,4 个已结课。30 天能跨过一次节假日/考试周的停课,又能排除上学期的老群。
+  - 覆盖:`--all` 关闭活跃度过滤(排除列表仍生效);`--group a,b` 强制只监听指定群;`im mute --group` 永久排除,`im unmute --group [--pin]` 取消排除,`--pin` 表示无论活跃与否都监听。
+  - `ready` 事件给出 `watched`/`skipped`/`skippedByReason`/`watchedGroups`;`im groups` 显示每个群的 `lastActivity`、`isWatched` 和 `reason`。
 - `--timeout <秒>` 到时退出(此命令里单位是秒),`--once` 收到第一条新签到即退出,`--include-existing` 把启动时已有的签到也输出。
 - `--notify-cmd '<shell>'`:每个事件执行一次,事件 JSON 走 stdin 和 `CXSIGN_EVENT`。
 - `--auto-sign` 默认关闭,**必须同时 `--confirm`**;只会自动做普通签到和位置签到(`--auto` 选点),其余类型输出 skipped。

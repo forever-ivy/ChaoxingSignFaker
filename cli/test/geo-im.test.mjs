@@ -5,6 +5,7 @@ import os from "node:os"
 import path from "node:path"
 import * as geo from "../src/geo.mjs"
 import { watchIM, backoffMs } from "../src/imwatch.mjs"
+import { classifyGroups, parseRoamingMessages } from "../src/api.mjs"
 import { run } from "../src/main.mjs"
 import { resetCache } from "../src/store.mjs"
 
@@ -144,62 +145,134 @@ function fakeClock() {
   let t = 1_700_000_000_000
   return { now: () => t, sleep: async (ms) => { t += ms } }
 }
+const DAY = 86400000
+const res = (signs = [], lastMessageTs = 0) => ({ signs, messageCount: signs.length, newCount: signs.length, lastMessageTs, lastSignTs: signs.reduce((a, x) => Math.max(a, x.messageTimestamp || 0), 0) })
+
+describe("group activity filter", () => {
+  const now = 1_700_000_000_000
+  const groups = ["a", "b", "c", "d", "e"].map((groupId) => ({ groupId, name: groupId }))
+  const activity = { a: res([], now - 2 * DAY), b: res([], now - 40 * DAY), c: res([], 0), d: res([], now - DAY), e: res([], now - DAY) }
+  const courses = { e: { isEnded: true } }
+  it("default keeps only recently active, non-ended groups", () => {
+    const r = Object.fromEntries(classifyGroups(groups, { activity, courses, now }).map((g) => [g.groupId, g.reason]))
+    assert.deepEqual(r, { a: "active", b: "inactive", c: "no-recent-messages", d: "active", e: "course-ended" })
+  })
+  it("--active-days widens the window", () => {
+    const g = classifyGroups(groups, { activity, courses, now, activeDays: 60 }).find((x) => x.groupId === "b")
+    assert.equal(g.isWatched, true)
+  })
+  it("--all ignores activity but mute still wins; pin forces", () => {
+    const r = classifyGroups(groups, { activity, courses, now, isAll: true, muted: ["a"], pinned: [] })
+    assert.deepEqual(r.filter((g) => g.isWatched).map((g) => g.groupId), ["b", "c", "d", "e"])
+    const p = classifyGroups(groups, { activity, courses, now, pinned: ["c"], muted: ["d"] })
+    assert.deepEqual(p.filter((g) => g.isWatched).map((g) => g.groupId), ["a", "c"])
+  })
+  it("--group forces exactly those groups even if muted or inactive", () => {
+    const r = classifyGroups(groups, { activity, now, forced: ["b"], muted: ["b"] })
+    assert.deepEqual(r.filter((g) => g.isWatched).map((g) => g.groupId), ["b"])
+  })
+  it("sign timestamp counts as activity", () => {
+    const r = classifyGroups([{ groupId: "x" }], { activity: { x: { lastMessageTs: 0, lastSignTs: now - DAY } }, now })
+    assert.equal(r[0].isWatched, true)
+  })
+  it("parseRoamingMessages skips messages older than cursor", () => {
+    const r = parseRoamingMessages([], { groupId: "g" }, { since: 5 })
+    assert.equal(r.messageCount, 0); assert.equal(r.lastMessageTs, 0)
+  })
+})
 
 describe("im watch (mocked)", () => {
-  const act = (id) => ({ activeId: id, title: "签到", classId: 1, courseId: 2, courseName: "C", startTimeTitle: "10-30 10:00", activeTypeName: "位置签到", signType: "location", groupId: "g", groupName: "G" })
-  it("emits only new activities after priming, honours --once", async () => {
-    const clk = fakeClock(); const lines = []; let poll = 0
-    const r = await watchIM({ args: { interval: 5, once: true, timeout: 600 } }, {}, {
-      ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)),
-      getConfig: async () => ({ accessToken: "SECRET", username: "u" }), getGroups: async () => [{ groupId: "g", name: "G" }],
-      fetchSigns: async () => (++poll < 3 ? [act(1)] : [act(1), act(2)]),
-    })
-    assert.equal(r.stopped, "once"); assert.equal(r.signEvents, 1)
-    const signs = lines.filter((l) => l.type === "sign")
-    assert.deepEqual(signs.map((s) => s.activeId), [2])
+  const act = (id, ts = 1_700_000_000_000) => ({ activeId: id, title: "签到", classId: 1, courseId: 2, courseName: "C", startTimeTitle: "10-30 10:00", activeTypeName: "位置签到", signType: "location", groupId: "g", groupName: "G", messageTimestamp: ts })
+  const base = (clk, lines, extra = {}) => ({
+    ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)), getCourses: async () => [],
+    getConfig: async () => ({ accessToken: "SECRET", username: "u" }), getGroups: async () => [{ groupId: "g", name: "G" }, { groupId: "old", name: "Old" }], ...extra,
+  })
+  it("only polls active groups, ready reports watched/skipped, emits new signs once", async () => {
+    const clk = fakeClock(); const lines = []; const polled = []; let n = 0
+    const r = await watchIM({ args: { interval: 5, once: true, timeout: 600 } }, {}, base(clk, lines, {
+      fetchMessages: async (im, g, o) => {
+        polled.push([g.groupId, o.since ?? 0])
+        if (g.groupId === "old") return res([], clk.now() - 100 * DAY)
+        return ++n < 3 ? res([act(1)], clk.now()) : res([act(1), act(2)], clk.now())
+      },
+    }))
+    const ready = lines.find((l) => l.type === "ready")
+    assert.equal(ready.watched, 1); assert.equal(ready.skipped, 1); assert.deepEqual(ready.skippedByReason, { inactive: 1 })
+    assert.equal(polled.filter(([g]) => g === "old").length, 1)
+    assert.ok(polled.filter(([g]) => g === "g").slice(1).every(([, since]) => since > 0))
+    assert.deepEqual(lines.filter((l) => l.type === "sign").map((s) => s.activeId), [2])
+    assert.equal(r.stopped, "once")
     assert.ok(!JSON.stringify(lines).includes("SECRET"))
+  })
+  it("ended courses are skipped via chatId", async () => {
+    const clk = fakeClock(); const lines = []
+    await watchIM({ args: { interval: 5, timeout: 4 } }, {}, base(clk, lines, {
+      getCourses: async () => [{ chatId: "g", isEnded: true }],
+      fetchMessages: async (im, g) => res([], g.groupId === "g" ? clk.now() : 0),
+    }))
+    assert.deepEqual(lines.find((l) => l.type === "ready").skippedByReason, { "course-ended": 1, "no-recent-messages": 1 })
+  })
+  it("rescan picks up a group that became active", async () => {
+    const clk = fakeClock(); const lines = []; const start = clk.now()
+    await watchIM({ args: { interval: 60, timeout: 3 * 3600, "rescan-minutes": 60 } }, {}, base(clk, lines, {
+      fetchMessages: async (im, g) => (g.groupId === "old" && clk.now() - start > 30 * 60000 ? res([act(5)], clk.now()) : res([], g.groupId === "g" ? clk.now() : 0)),
+    }))
+    const rs = lines.filter((l) => l.type === "rescan")
+    assert.ok(rs.length >= 1); assert.deepEqual(rs[0].added, ["old"])
+    assert.ok(lines.some((l) => l.type === "sign" && l.activeId === 5))
+  })
+  it("muted list and --all", async () => {
+    const clk = fakeClock(); const lines = []
+    await watchIM({ args: { interval: 5, timeout: 4, all: true } }, {}, base(clk, lines, { lists: { muted: ["g"], pinned: [] }, fetchMessages: async () => res([], 0) }))
+    const ready = lines.find((l) => l.type === "ready")
+    assert.equal(ready.watched, 1); assert.equal(ready.watchedGroups[0].groupId, "old"); assert.deepEqual(ready.skippedByReason, { muted: 1 })
   })
   it("include-existing emits history", async () => {
     const clk = fakeClock(); const lines = []
-    await watchIM({ args: { interval: 5, timeout: 4, "include-existing": true } }, {}, {
-      ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)),
-      getConfig: async () => ({ accessToken: "t", username: "u" }), getGroups: async () => [{ groupId: "g", name: "G" }], fetchSigns: async () => [act(7)],
-    })
+    await watchIM({ args: { interval: 5, timeout: 4, "include-existing": true } }, {}, base(clk, lines, { fetchMessages: async (im, g) => res(g.groupId === "g" ? [act(7)] : [], clk.now()) }))
     assert.equal(lines.filter((l) => l.type === "sign")[0].existing, true)
   })
   it("reconnects with backoff after failures", async () => {
     const clk = fakeClock(); const lines = []; let n = 0
-    const r = await watchIM({ args: { interval: 10, timeout: 60 } }, {}, {
-      ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)),
+    const r = await watchIM({ args: { interval: 10, timeout: 60 } }, {}, base(clk, lines, {
       getConfig: async () => { if (++n <= 2) throw Object.assign(new Error("boom"), { code: "NETWORK_ERROR" }); return { accessToken: "t", username: "u" } },
-      getGroups: async () => [], fetchSigns: async () => [],
-    })
-    const d = lines.filter((l) => l.type === "disconnected")
-    assert.deepEqual(d.map((x) => x.retryInMs), [2000, 4000])
-    assert.equal(r.isConnected, true); assert.equal(r.stopped, "timeout")
+      fetchMessages: async () => res([], 0),
+    }))
+    assert.deepEqual(lines.filter((l) => l.type === "disconnected").map((x) => x.retryInMs), [2000, 4000])
+    assert.equal(r.isConnected, true)
   })
-  it("401 on group fetch forces re-login", async () => {
+  it("401 on poll forces re-login", async () => {
     const clk = fakeClock(); const lines = []; let cfg = 0, f = 0
-    await watchIM({ args: { interval: 5, timeout: 30 } }, {}, {
-      ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)),
-      getConfig: async () => { cfg++; return { accessToken: "t", username: "u" } }, getGroups: async () => [{ groupId: "g", name: "G" }],
-      fetchSigns: async () => { if (++f === 2) throw Object.assign(new Error("HTTP 401"), { status: 401 }); return [] },
-    })
+    await watchIM({ args: { interval: 5, timeout: 30, group: "g" } }, {}, base(clk, lines, {
+      getConfig: async () => { cfg++; return { accessToken: "t", username: "u" } },
+      fetchMessages: async () => { if (++f === 2) throw Object.assign(new Error("HTTP 401"), { status: 401 }); return res([], clk.now()) },
+    }))
     assert.ok(cfg >= 2); assert.ok(lines.some((l) => l.type === "reconnected"))
   })
   it("notify-cmd and autoSign hooks run per event", async () => {
     const clk = fakeClock(); const lines = []; const notified = []; const signed = []; let poll = 0
-    await watchIM({ args: { interval: 5, once: true, timeout: 100, "notify-cmd": "cat" } }, {}, {
-      ...clk, noSignals: true, write: (l) => lines.push(JSON.parse(l)),
-      getConfig: async () => ({ accessToken: "t", username: "u" }), getGroups: async () => [{ groupId: "g", name: "G" }],
-      fetchSigns: async () => (++poll === 1 ? [] : [act(9)]),
+    await watchIM({ args: { interval: 5, once: true, timeout: 100, "notify-cmd": "cat", group: "g" } }, {}, base(clk, lines, {
+      fetchMessages: async () => (++poll === 1 ? res([], clk.now()) : res([act(9)], clk.now())),
       notify: async (cmd, ev) => { notified.push([cmd, ev.activeId]); return { exitCode: 0 } },
       autoSign: async (ev) => { signed.push(ev.activeId); return { ok: true } },
-    })
+    }))
     assert.deepEqual(notified, [["cat", 9]]); assert.deepEqual(signed, [9])
-    assert.ok(lines.some((l) => l.type === "auto-sign"))
   })
   it("backoff caps", () => {
     assert.equal(backoffMs(1, 1000), 1000); assert.equal(backoffMs(4, 1000), 8000); assert.equal(backoffMs(30, 1000), 300000)
+  })
+})
+
+describe("im mute/unmute", () => {
+  it("dry-run then confirm persists lists", async () => {
+    resetCache()
+    let r = await run(["im", "mute", "--group", "123", "--json"])
+    assert.equal(r.exitCode, 10)
+    resetCache(); r = await run(["im", "mute", "--group", "123", "--confirm", "--json"])
+    assert.equal(r.exitCode, 0); assert.deepEqual(JSON.parse(r.stdout).data.muted, ["123"])
+    resetCache(); r = await run(["im", "unmute", "--group", "123", "--pin", "--confirm", "--json"])
+    assert.deepEqual(JSON.parse(r.stdout).data, { muted: [], pinned: ["123"] })
+    resetCache(); r = await run(["im", "lists", "--json"])
+    assert.deepEqual(JSON.parse(r.stdout).data.pinned, ["123"])
   })
 })

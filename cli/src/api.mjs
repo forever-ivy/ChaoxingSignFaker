@@ -12,7 +12,7 @@ function sessionExpired(client, data) {
   return new CxError("AUTH_SESSION_EXPIRED", "登录状态已过期", { account: client.label, ...(data ? { snippet: scrubString(String(data).slice(0, 120)) } : {}) })
 }
 
-async function courseListJson(client) {
+export async function courseListJson(client) {
   const res = await client.req({ url: URL_COURSE_LIST })
   if (res.status === 403) throw sessionExpired(client)
   checkResponse(res)
@@ -36,6 +36,9 @@ export function parseCourseList(channelList) {
       classId: Number(content.id),
       imageUrl: d.imageurl ?? DEFAULT_COURSE_IMAGE,
       schools: d.schools ?? null,
+      chatId: content.chatid ? String(content.chatid) : null,
+      isEnded: content.state === 1,
+      isFiled: content.isFiled === 1,
     })
   }
   return out
@@ -647,25 +650,62 @@ export function parseIMSignActivityInfo(att) {
   }
 }
 
-export async function fetchGroupSignActivities(im, group) {
+export async function fetchGroupMessages(im, group, { since = 0 } = {}) {
   const res = await request(null, {
     method: "POST", url: URL_MESSAGE_ROAMING(im.username), ua: USER_AGENT_EASEMOB, contentType: "text/plain;charset=UTF-8",
     headers: { Authorization: `Bearer ${im.accessToken}` },
     body: JSON.stringify({ end: "-1", queue: `${group.groupId}@conference.easemob.com`, start: "-1" }),
   })
   checkResponse(res)
-  const msgs = res.json()?.data?.msgs ?? []
+  return parseRoamingMessages(res.json()?.data?.msgs ?? [], group, { since })
+}
+
+export function parseRoamingMessages(msgs, group, { since = 0 } = {}) {
   const out = new Map()
+  let lastMessageTs = 0, newCount = 0
   for (const m of msgs) {
     try {
       const d = decodeIMMessage(m.msg)
+      if (d.timestamp > lastMessageTs) lastMessageTs = d.timestamp
+      if (since && d.timestamp && d.timestamp <= since) continue
+      newCount++
       const att = d.ext.find((e) => e.key === "attachment")
       if (!att) continue
       const info = parseIMSignActivityInfo(JSON.parse(att.stringValue))
       if (info && !out.has(info.activeId)) out.set(info.activeId, { ...info, groupId: group.groupId, groupName: group.name, messageTimestamp: d.timestamp })
     } catch {}
   }
-  return [...out.values()]
+  const signs = [...out.values()]
+  const lastSignTs = signs.reduce((a, x) => Math.max(a, x.messageTimestamp || 0), 0)
+  return { signs, messageCount: msgs.length, newCount, lastMessageTs, lastSignTs }
+}
+
+export async function fetchGroupSignActivities(im, group) {
+  return (await fetchGroupMessages(im, group)).signs
+}
+
+export const DEFAULT_ACTIVE_DAYS = 30
+
+export function classifyGroups(groups, { activity = {}, courses = {}, activeDays = DEFAULT_ACTIVE_DAYS, isAll = false, forced = [], muted = [], pinned = [], now = Date.now() } = {}) {
+  const forcedSet = new Set(forced.map(String)), mutedSet = new Set(muted.map(String)), pinnedSet = new Set(pinned.map(String))
+  const cutoff = now - activeDays * 86400000
+  return groups.map((g) => {
+    const id = String(g.groupId)
+    const a = activity[id]
+    const lastActivityTs = a ? Math.max(a.lastMessageTs || 0, a.lastSignTs || 0) || null : null
+    const course = courses[id] ?? null
+    let isWatched, reason
+    if (forcedSet.size) { isWatched = forcedSet.has(id); reason = isWatched ? "forced" : "not-selected" }
+    else if (mutedSet.has(id)) { isWatched = false; reason = "muted" }
+    else if (pinnedSet.has(id)) { isWatched = true; reason = "pinned" }
+    else if (isAll) { isWatched = true; reason = "all" }
+    else if (course?.isEnded || course?.isFiled) { isWatched = false; reason = "course-ended" }
+    else if (!a) { isWatched = true; reason = "scan-failed" }
+    else if (!lastActivityTs) { isWatched = false; reason = "no-recent-messages" }
+    else if (lastActivityTs >= cutoff) { isWatched = true; reason = "active" }
+    else { isWatched = false; reason = "inactive" }
+    return { ...g, lastActivityTs, lastActivity: lastActivityTs ? new Date(lastActivityTs).toISOString() : null, isCourseEnded: !!(course?.isEnded || course?.isFiled), isWatched, reason }
+  })
 }
 
 const START_TIME_TITLE_PATTERN = /(?:(\d{2,4})-)?(\d{1,2})-(\d{1,2}) (\d{1,2}):(\d{1,2})/

@@ -125,12 +125,12 @@ describe("qrcode parse", () => {
 describe("course / activity parsing", () => {
   it("parseCourseList filters and maps", () => {
     const list = parseCourseList([
-      { cataName: "x", content: { id: 1, course: { data: [{ id: 10, name: "A", teacherfactor: "T", imageurl: "u", schools: "S" }] } } },
+      { cataName: "x", content: { id: 1, chatid: 99, state: 1, course: { data: [{ id: 10, name: "A", teacherfactor: "T", imageurl: "u", schools: "S" }] } } },
       { content: { id: 2, course: { data: [{ id: 20, name: "B" }] } } },
       { cataName: "y", content: { id: 3 } },
     ])
     assert.equal(list.length, 1)
-    assert.deepEqual(list[0], { courseName: "A", teacher: "T", courseId: 10, classId: 1, imageUrl: "u", schools: "S" })
+    assert.deepEqual(list[0], { courseName: "A", teacher: "T", courseId: 10, classId: 1, imageUrl: "u", schools: "S", chatId: "99", isEnded: true, isFiled: false })
   })
   it("parseActivityList keeps type 2/74", () => {
     const now = Date.now()

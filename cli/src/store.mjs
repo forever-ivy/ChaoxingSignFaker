@@ -33,6 +33,8 @@ export function emptyState() {
     bypassBlockedChecking: false,
     preferClassId: [],
     preferGroupId: [],
+    imMutedGroups: [],
+    imPinnedGroups: [],
     classSchedule: { lessons: [], lastFetchTimestamp: 0, firstWeekDate: 0, contentMd5: "" },
     preferences: { customizedUserAgent: "", customizedPackageName: "", clientIdentity: "", alwaysForceSign: false, isIgnoreAllConsistentDeviceCodeComponents: false },
     pending: {},

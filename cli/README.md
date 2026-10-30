@@ -29,6 +29,10 @@ cxsign locations add --label 教室 --search "燕山大学 西校区" --pick 0 -
 cxsign im watch --timeout 20 --json                     # 只连一下
 cxsign im watch --interval 10 --notify-cmd 'cat >> ~/signs.ndjson'
 cxsign im watch --auto-sign --confirm                   # 自动签到,默认关闭
+cxsign im groups --json                                 # 每个群的最近活动时间、是否会被监听及原因
+cxsign im watch --active-days 14 --rescan-minutes 30    # 默认只监听 30 天内活跃且未结课的群
+cxsign im watch --all                                   # 监听全部(排除列表仍生效)
+cxsign im mute --group <id> --confirm                   # 永久不监听;im unmute --group <id> [--pin] --confirm
 ```
 
 stdout 每行一个 JSON 事件(`connected`/`ready`/`sign`/`disconnected`/`reconnected`/`auto-sign`/`stopped`)。最后一行是标准 envelope。
