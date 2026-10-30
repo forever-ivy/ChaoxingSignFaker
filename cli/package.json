@@ -1,0 +1,23 @@
+{
+  "name": "cxsign",
+  "version": "1.0.0",
+  "private": true,
+  "description": "ChaoxingSignFaker agent-facing CLI",
+  "type": "module",
+  "bin": {
+    "cxsign": "./bin/cxsign"
+  },
+  "scripts": {
+    "cxsign": "node src/bin.mjs",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "optionalDependencies": {
+    "onnxruntime-node": "^1.20.0",
+    "jsqr": "^1.4.0",
+    "jpeg-js": "^0.4.4",
+    "pngjs": "^7.0.0"
+  }
+}
