@@ -186,6 +186,24 @@ export async function getSignInfo(client, activeId) {
   return j.data
 }
 
+export const URL_ATTEND_INFO = "https://mobilelearn.chaoxing.com/v2/apis/sign/getAttendInfo"
+export const ATTEND_SIGNED = 1
+
+// 本人在某活动的签到记录(只读)。位置签到时 latitude/longitude 是当时提交的 bd09 坐标,title 是提交的地址。
+export async function getAttendInfo(client, activeId) {
+  const res = await client.req({ url: URL_ATTEND_INFO, query: { activeId }, hedge: true })
+  checkResponse(res)
+  return parseAttendInfo(res.json())
+}
+
+export function parseAttendInfo(j) {
+  const d = j?.data
+  if (!d) return null
+  const lat = Number(d.latitude), lon = Number(d.longitude)
+  const ok = d.latitude !== null && d.latitude !== undefined && d.latitude !== "" && Number.isFinite(lat) && Number.isFinite(lon) && lat !== -1 && lon !== -1 && !(lat === 0 && lon === 0)
+  return { status: d.status ?? null, latitude: ok ? lat : null, longitude: ok ? lon : null, address: d.title ?? null, submitTime: d.submittime ?? d.updatetime ?? null }
+}
+
 export function describeSignInfo(d) {
   const endTime = d.endTime ?? d.endtime ?? null
   const signOutTs = d.signOutPublishTimeStamp

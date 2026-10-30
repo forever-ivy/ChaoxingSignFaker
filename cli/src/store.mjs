@@ -35,6 +35,7 @@ export function emptyState() {
     preferGroupId: [],
     imMutedGroups: [],
     imPinnedGroups: [],
+    learnedLocations: {},
     classSchedule: { lessons: [], lastFetchTimestamp: 0, firstWeekDate: 0, contentMd5: "" },
     preferences: { customizedUserAgent: "", customizedPackageName: "", clientIdentity: "", alwaysForceSign: false, isIgnoreAllConsistentDeviceCodeComponents: false },
     pending: {},

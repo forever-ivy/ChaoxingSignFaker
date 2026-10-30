@@ -10,6 +10,7 @@ import { Client, selfClient, otherClient, resolveClient, ensureUser, applyClient
 import { CookieSession, checkResponse, request, phase } from "./http.mjs"
 import * as api from "./api.mjs"
 import * as geo from "./geo.mjs"
+import { clusterPoints, pickLearnedTarget, LEARN_CLUSTER_METERS } from "./learn.mjs"
 import { watchIM, scanGroups, courseIndex } from "./imwatch.mjs"
 import { captchaModelStatus, predictSliderXOffset, decodeQRCodeImage, warmCaptchaModel } from "./image.mjs"
 import { createRequire } from "node:module"
@@ -85,9 +86,20 @@ export async function cachedGeocode(text, cfg, lookup = geo.geocodeAddress, now 
   return hit
 }
 
-async function activityTarget(c, activeId, signer = null) {
+export function learnedTarget(st, raw, classId) {
+  const hit = pickLearnedTarget(st.learnedLocations, { classId: raw.clazzid ?? classId, locationText: raw.locationText || undefined })
+  if (!hit) return null
+  const radius = raw.locationRange === null || raw.locationRange === undefined || raw.locationRange === "" ? null : Number(raw.locationRange)
+  const k = hit.cluster
+  return { latitude: k.latitude, longitude: k.longitude, radius, address: raw.locationText || k.address, coordSystem: geo.SIGN_COORD_SYSTEM, source: "learned", method: "learned-history",
+    learnedMatch: hit.match, learnedCount: k.count, isApproximate: false,
+    reason: `接口没返回中心坐标;使用历史签到学到的位置(${hit.match === "class" ? "同班级最常用点" : "同一签到地址"},${k.count} 次成功签到的中心,离散 ${k.spreadMeters} 米)` }
+}
+
+async function activityTarget(c, activeId, signer = null, classId = null) {
   const raw = signer ? await signer.getSignInfo() : await api.getSignInfo(c, activeId)
   let target = geo.resolveSignTarget(raw)
+  if (!target && raw.ifopenAddress === 1) target = learnedTarget(load(), raw, classId)
   if (!target && raw.ifopenAddress === 1 && raw.locationText) {
     try {
       const hit = await phase("geocode", () => cachedGeocode(raw.locationText, geoCfg()))
@@ -108,8 +120,8 @@ async function resolveSignPosition(ctx, c, signer = null) {
   if (explicit && !a.auto) return { pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` }
   if (a.favorite && !a.auto) return { pos: findLocation(load(), a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` }
   if (a["no-auto"] !== true) {
-    const { target } = await activityTarget(c, a.active, signer)
-    if (target) return { pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? ""), source: "activity", reason: target.reason, target }
+    const { target } = await activityTarget(c, a.active, signer, a.class)
+    if (target) return { pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? ""), source: target.source === "learned" ? "learned" : "activity", reason: target.reason, target }
     if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
   }
   const rem = load().classSelectedLocation[String(a.class)] ?? load().classRememberedLocation[String(a.class)]
@@ -1002,6 +1014,15 @@ export const COMMANDS = [
     },
   },
   {
+    name: "locations learn", summary: "扫描历史位置签到,按课程/班级聚类出常用签到点(bd09);加 --confirm 保存为收藏并供 sign location --auto 优先使用", auth: true, sideEffect: true, paged: false,
+    args: [n("course", "只看该课程 ID"), n("class", "只看该班级 ID"), n("days", "只看最近 N 天的活动", { default: 180 }), n("cluster-m", "聚类半径(米)", { default: LEARN_CLUSTER_METERS }), n("top", "每个班级保留前 N 个点", { default: 3 })],
+    plan: async (ctx) => withRelogin(ctx, (c) => learnScan(ctx, c)),
+    async run(ctx) {
+      const r = await withRelogin(ctx, (c) => learnScan(ctx, c))
+      return { ...r, saved: saveLearned(load(), r.proposals) }
+    },
+  },
+  {
     name: "locations search", summary: "地图选点:地址/POI 关键词转坐标(输出签到用的 bd09)", auth: false, paged: true,
     args: [s("keyword", "关键词", { required: true }), s("city", "城市"), n("max", "最多返回条数", { default: 10 })],
     async run(ctx) {
@@ -1199,3 +1220,64 @@ export const COMMANDS = [
     },
   },
 ]
+
+
+export const LEARN_SCAN_CONCURRENCY = 8
+
+export async function learnScan(ctx, c, now = Date.now()) {
+  const a = ctx.args
+  const days = a.days ?? 180, radius = a["cluster-m"] ?? LEARN_CLUSTER_METERS, top = a.top ?? 3
+  let courses = await api.getAllCourses(c)
+  if (a.course !== undefined) courses = courses.filter((x) => Number(x.courseId) === Number(a.course))
+  if (a.class !== undefined) courses = courses.filter((x) => Number(x.classId) === Number(a.class))
+  const acts = []
+  await mapLimit(courses, LEARN_SCAN_CONCURRENCY, async (course) => {
+    try {
+      const { activities } = await api.getActivities(c, course)
+      for (const x of activities) if (x.signType === "location" && (!days || !x.startTime || Number(x.startTime) >= now - days * 86400000)) acts.push({ ...x, courseName: course.courseName })
+    } catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e }
+  })
+  const rows = []
+  await mapLimit(acts, LEARN_SCAN_CONCURRENCY, async (x) => {
+    const [att, info] = await Promise.all([api.getAttendInfo(c, x.activeId).catch(() => null), api.getSignInfo(c, x.activeId).catch(() => null)])
+    rows.push({ act: x, att, locationText: info?.locationText || "" })
+  })
+  const byStatus = {}
+  for (const r of rows) { const k = String(r.att?.status ?? "none"); byStatus[k] = (byStatus[k] ?? 0) + 1 }
+  const usable = rows.filter((r) => r.att?.latitude !== null && r.att?.latitude !== undefined)
+  const groups = new Map()
+  for (const r of usable) {
+    const k = String(r.act.classId)
+    if (!groups.has(k)) groups.set(k, { classId: r.act.classId, courseId: r.act.courseId, courseName: r.act.courseName, points: [] })
+    groups.get(k).points.push({ latitude: r.att.latitude, longitude: r.att.longitude, address: r.att.address, locationText: r.locationText, activeId: r.act.activeId, startTime: r.act.startTime })
+  }
+  const proposals = [...groups.values()].map((g) => {
+    const clusters = clusterPoints(g.points, radius).slice(0, top)
+    return { classId: g.classId, courseId: g.courseId, courseName: g.courseName, samples: g.points.length, favoriteLabel: `历史:${g.courseName ?? g.courseId}`, clusters }
+  }).sort((x, y) => y.samples - x.samples)
+  return {
+    coordSystem: geo.SIGN_COORD_SYSTEM, source: "getAttendInfo(本人签到记录)", days, clusterMeters: radius,
+    courses: courses.length, locationActivities: rows.length, withCoordinates: usable.length, attendStatus: byStatus,
+    proposals,
+  }
+}
+
+export function saveLearned(st, proposals, now = Date.now()) {
+  st.learnedLocations = st.learnedLocations ?? {}
+  st.locations = st.locations ?? []
+  const saved = []
+  for (const p of proposals) {
+    if (!p.clusters?.length) continue
+    st.learnedLocations[String(p.classId)] = { courseId: p.courseId, courseName: p.courseName ?? null, clusters: p.clusters.map(({ activeIds, ...k }) => k), at: now }
+    p.clusters.forEach((k, i) => {
+      const label = i === 0 ? p.favoriteLabel : `${p.favoriteLabel}#${i + 1}`
+      const loc = { label, latitude: k.latitude, longitude: k.longitude, address: k.address || k.locationTexts?.[0] || "", learned: true, classId: p.classId }
+      const j = st.locations.findIndex((l) => l.label === label)
+      if (j >= 0 && !st.locations[j].learned) return
+      if (j >= 0) st.locations[j] = loc; else st.locations.push(loc)
+      saved.push(label)
+    })
+  }
+  markDirty()
+  return saved
+}

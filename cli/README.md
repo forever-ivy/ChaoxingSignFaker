@@ -45,3 +45,17 @@ stdout 每行一个 JSON 事件(`connected`/`ready`/`sign`/`disconnected`/`recon
 - 只读 GET(课程列表、活动列表、活动信息、课表)超过 `--hedge-ms`(默认 2500ms)没响应会并发补发一次,取先返回的;签到请求和 POST 从不补发。
 - `activities available` 以 8 路并发扫描全部课程。
 - 带 `--captcha-auto` 时,滑块模型在签到检查期间就开始加载。
+
+## 从历史签到学习位置
+
+超星的活动详情(getPPTActiveInfo)经常只给 `locationText` 和半径,不给中心坐标。但本人每次签到的记录
+(`/v2/apis/sign/getAttendInfo?activeId=`)保存了当时提交的 bd09 坐标和地址。
+
+```bash
+cxsign locations learn [--course ID] [--class ID] [--days 180] [--cluster-m 80] [--top 3]   # 只读预览
+cxsign locations learn --days 365 --confirm   # 保存:每个班级的簇 + 收藏位置 "历史:<课程名>"
+```
+
+保存后 `sign location --auto`(或活动开启位置但未给坐标时)按以下顺序选点:
+接口中心坐标 → 学到的位置(先匹配相同签到地址,再用同班级最常用点) → 地址地理编码。
+已有的同名手动收藏不会被覆盖。
