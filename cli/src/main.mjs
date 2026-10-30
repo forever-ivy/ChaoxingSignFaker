@@ -189,12 +189,12 @@ export async function run(argv, env = process.env) {
     if (httpOptions.trace) { stats.trace = []; stats.phases = [] }
     applyClientPreferences()
 
-    if (path.length === 0 || path[0] === "help") {
+    if ((path.length === 0 && !isTruthy(flags.version)) || path[0] === "help") {
       const p = path[0] === "help" ? path.slice(1) : []
       return emit({ ok: true, command: "help", data: { text: helpText(p) } }, helpText(p), 0)
     }
     if (path[0] === "schema") return emit({ ok: true, command: "schema", data: schema() }, JSON.stringify(schema(), null, 2), 0)
-    if (path[0] === "version") {
+    if (path[0] === "version" || (path.length === 0 && isTruthy(flags.version))) {
       const v = { cli: CLI_VERSION, app: APP_VERSION, node: process.version }
       return emit({ ok: true, command: "version", data: v }, `cxsign ${v.cli} (app ${v.app}, node ${v.node})`, 0)
     }

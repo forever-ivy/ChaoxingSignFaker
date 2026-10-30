@@ -202,7 +202,8 @@ export function checkResponse(resp) {
   if (resp.ok) return resp
   if (resp.status === 429) throw new CxError("RATE_LIMITED", "请求过于频繁(HTTP 429)", { status: 429 }, 429)
   const msg = { 403: "网络异常，访问被拒绝", 404: "网络异常，资源未找到", 500: "网络异常，服务器内部错误" }[resp.status] ?? `网络异常，错误码：${resp.status}`
-  throw new CxError(resp.status === 404 ? "DATA_NOT_FOUND" : "BACKEND_BUSINESS_ERROR", msg, { status: resp.status, url: redactUrl(resp.url), snippet: scrubString(resp.text.slice(0, 200)) }, resp.status)
+  const code = resp.status === 404 ? "DATA_NOT_FOUND" : resp.status >= 500 ? "BACKEND_UNAVAILABLE" : "BACKEND_BUSINESS_ERROR"
+  throw new CxError(code, msg, { status: resp.status, url: redactUrl(resp.url), snippet: scrubString(resp.text.slice(0, 200)) }, resp.status)
 }
 
 export function unwrapJsonp(text) {

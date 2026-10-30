@@ -64,7 +64,7 @@ export function toErrorPayload(e) {
     exitCode: CODE_EXIT[code],
     ...(typeof e?.status === "number" ? { status: e.status } : {}),
     ...(e?.details !== undefined ? { details: scrub(e.details) } : {}),
-    retryable: RETRYABLE.has(code),
+    retryable: typeof e?.details?.retryable === "boolean" ? e.details.retryable : RETRYABLE.has(code),
   }
 }
 

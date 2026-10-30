@@ -1143,14 +1143,14 @@ export const COMMANDS = [
     name: "banlist", summary: "获取被封禁的学校 fid 列表(公开)", auth: false,
     async run() {
       try { return { banfids: await api.getBanlist() } }
-      catch (e) { throw new CxError(e.code ?? "BACKEND_BUSINESS_ERROR", `封禁名单获取失败: ${e.message}`) }
+      catch (e) { throw new CxError(e.code ?? "BACKEND_BUSINESS_ERROR", `封禁名单获取失败: ${e.message}`, e.details, e.status) }
     },
   },
   {
     name: "sponsors", summary: "获取捐赠名单(公开)", auth: false,
     async run() {
       try { return await api.getSponsors() }
-      catch (e) { throw new CxError(e.code ?? "BACKEND_BUSINESS_ERROR", `捐赠名单获取失败: ${e.message}`) }
+      catch (e) { throw new CxError(e.code ?? "BACKEND_BUSINESS_ERROR", `捐赠名单获取失败: ${e.message}`, e.details, e.status) }
     },
   },
 

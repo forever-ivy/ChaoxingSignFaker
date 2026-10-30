@@ -37,6 +37,7 @@ export const CODE_EXIT = {
   TIMEOUT: 5,
   BACKEND_BUSINESS_ERROR: 6,
   BACKEND_PROTOCOL_ERROR: 6,
+  BACKEND_UNAVAILABLE: 6,
   SIGN_ALREADY_SIGNED: 6,
   SIGN_EXPIRED: 6,
   SIGN_ENDED: 6,
@@ -54,7 +55,7 @@ export const CODE_EXIT = {
   UNKNOWN: 1,
 }
 
-export const RETRYABLE = new Set(["NETWORK_ERROR", "TIMEOUT", "RATE_LIMITED"])
+export const RETRYABLE = new Set(["NETWORK_ERROR", "TIMEOUT", "RATE_LIMITED", "BACKEND_UNAVAILABLE"])
 
 export const GLOBAL_FLAGS = [
   { name: "json", type: "boolean", env: "CXSIGN_JSON", description: "输出单行 JSON 信封 {ok,command,data,meta} / {ok:false,error}" },

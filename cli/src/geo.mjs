@@ -1,4 +1,5 @@
 import { CxError, usage } from "./errors.mjs"
+import { stats, options as httpOpts } from "./http.mjs"
 
 const PI = Math.PI
 const X_PI = (PI * 3000) / 180
@@ -185,7 +186,13 @@ const UA = "cxsign/1.0 (+https://github.com/aquamarine5/ChaoxingSignFaker)"
 
 async function getJson(fetchImpl, url) {
   let res
-  try { res = await fetchImpl(url, { headers: { "User-Agent": UA, "Accept-Language": "zh-CN" } }) } catch (e) { throw new CxError("NETWORK_ERROR", `地理编码服务连接失败: ${e.message}`, { retryable: true }) }
+  // 地理编码请求不走 http.request,这里单独计入 meta.httpRequests 与 --trace
+  stats.requests++
+  const started = Math.round(performance.now())
+  const u = new URL(String(url))
+  const record = (status) => { if (httpOpts.trace) stats.trace.push({ method: "GET", host: u.hostname, path: u.pathname, status, startMs: started, ms: Math.round(performance.now()) - started, attempt: 1 }) }
+  try { res = await fetchImpl(url, { headers: { "User-Agent": UA, "Accept-Language": "zh-CN" } }) } catch (e) { record(0); throw new CxError("NETWORK_ERROR", `地理编码服务连接失败: ${e.message}`, { retryable: true }) }
+  record(res.status)
   if (!res.ok) throw new CxError("NETWORK_ERROR", `地理编码服务 HTTP ${res.status}`, { retryable: res.status >= 500 || res.status === 429 })
   return res.json()
 }
