@@ -45,6 +45,9 @@ const EDGE_OFFSET = 4
 
 export function modelPath() {
   if (process.env.CXSIGN_ORT_MODEL) return process.env.CXSIGN_ORT_MODEL
+  // 发布包里模型与打包后的 cxsign.mjs 放在同一目录
+  const bundled = path.resolve(here, "captcha.ort")
+  if (fs.existsSync(bundled)) return bundled
   return path.resolve(here, "..", "..", "app", "src", "main", "assets", "captcha.ort")
 }
 
