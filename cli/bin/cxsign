@@ -1,0 +1,9 @@
+#!/usr/bin/env node
+import { pathToFileURL } from "node:url"
+import path from "node:path"
+import { fileURLToPath } from "node:url"
+import os from "node:os"
+import module from "node:module"
+try { module.enableCompileCache?.(process.env.NODE_COMPILE_CACHE || path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), ".cache"), "cxsign", "v8")) } catch {}
+const here = path.dirname(fileURLToPath(import.meta.url))
+await import(pathToFileURL(path.resolve(here, "..", "src", "bin.mjs")).href)
