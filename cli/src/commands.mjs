@@ -1,6 +1,3 @@
-/**
- * 全部子命令:spec + 实现。实现调用 src/api.mjs / src/client.mjs,对应 App 的全部功能。
- */
 import fs from "node:fs"
 import path from "node:path"
 import crypto from "node:crypto"
@@ -92,7 +89,6 @@ async function solveCaptcha(signer, args) {
   return null
 }
 
-/** 真正签一次:需要验证码时按 flags 处理;设备码冲突时重置一次 */
 async function doSign(signer, once, args) {
   let need = await once(null)
   if (need === true) {
@@ -122,7 +118,6 @@ async function readStdin() {
 
 export const COMMANDS = [
 
-  // ─── auth ──────────────────────────────────────────────────────────── //
   {
     name: "auth login", summary: "用手机号 + 密码登录学习通", auth: false,
     args: [
@@ -142,19 +137,19 @@ export const COMMANDS = [
       checkPassword(password)
       applyClientPreferences()
       const st = load()
-      const remember = !ctx.args["no-remember"] && ctx.args.remember !== false
+      const isRemember = !ctx.args["no-remember"] && ctx.args.remember !== false
       const rec = {
         phoneNumber: phone, password: null, cookies: [], configuredFid: null, puid: null, name: "",
         deviceCode: randomizedDeviceCode(), isNotRandomizedDeviceCode: false, isDeviceCodeDuplicatedSignBefore: false,
         androidId: crypto.randomBytes(8).toString("hex"), user: null,
       }
-      st.loginSession = rec; markDirty()
       const c = new Client(rec, { isSelf: true })
       const enc = encryptByAES(password)
       await c.login(enc)
-      if (!remember) { rec.password = null; markDirty() }
       await c.getInfo()
-      return { phone: maskPhone(phone), name: c.name, puid: c.puid, uid: c.uid, fid: c.configuredFid, schools: c.user.fidList, remembered: remember }
+      if (!isRemember) rec.password = null
+      st.loginSession = rec; markDirty()
+      return { phone: maskPhone(phone), name: c.name, puid: c.puid, uid: c.uid, fid: c.configuredFid, schools: c.user.fidList, remembered: isRemember }
     },
   },
   {
@@ -185,6 +180,7 @@ export const COMMANDS = [
       st.loginSession = null
       if (ctx.args.forget) {
         st.otherUsers = []; st.faceRecognitionConfigures = {}; st.locations = []
+        st.classRememberedLocation = {}; st.classSelectedLocation = {}
         st.analysis = { locationSign: 0, qrcodeSign: 0, photoSign: 0, clickSign: 0, gestureSign: 0, otherUserSign: 0, passwordSign: 0 }
         st.classSchedule = { lessons: [], lastFetchTimestamp: 0, firstWeekDate: 0, contentMd5: "" }
       }
@@ -218,7 +214,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── user ──────────────────────────────────────────────────────────── //
   {
     name: "user info", summary: "当前账号的详细资料(不含密码 / cookie)", auth: true,
     async run(ctx) {
@@ -229,7 +224,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── courses / activities ──────────────────────────────────────────── //
   {
     name: "courses list", summary: "列出全部课程", auth: true, paged: true,
     async run(ctx) {
@@ -259,7 +253,6 @@ export const COMMANDS = [
             for (const a of activities) if (a.isRecent) out.push({ ...a, courseName: course.courseName, teacher: course.teacher })
           } catch (e) {
             if (e.code === "AUTH_SESSION_EXPIRED") throw e
-            /* 单门课失败跳过 */
           }
         }
         return out.sort((a, b) => (b.startTime ?? 0) - (a.startTime ?? 0))
@@ -286,7 +279,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── sign ──────────────────────────────────────────────────────────── //
   {
     name: "sign location", summary: "位置签到", auth: true, sideEffect: true,
     args: [
@@ -426,7 +418,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── qrcode ────────────────────────────────────────────────────────── //
   {
     name: "qrcode parse", summary: "解析二维码原文(离线)", auth: false,
     args: [s("text", "二维码原文", { required: true })],
@@ -438,7 +429,7 @@ export const COMMANDS = [
     async run(ctx) {
       const text = decodeQRCodeImage(fs.readFileSync(ctx.args.file))
       let parsed = null
-      try { parsed = api.parseQRCode(text) } catch { /* 不是签到二维码也返回原文 */ }
+      try { parsed = api.parseQRCode(text) } catch {}
       return { text, parsed }
     },
   },
@@ -454,7 +445,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── captcha ───────────────────────────────────────────────────────── //
   {
     name: "captcha conf", summary: "获取滑块验证码 conf(公开,免登录)", auth: false,
     async run() { return { t: await api.getCaptchaConf(null), captchaId: api.CAPTCHA_ID } },
@@ -483,7 +473,6 @@ export const COMMANDS = [
       if (ctx.args.predict) {
         try { predicted = await predictSliderXOffset(shade.buf) } catch (e) { predicted = { error: e.message } }
       }
-      // 把 captcha 数据暂存到 pending,便于后续 captcha check 引用
       load().pending.captcha = { captchaId: data.captchaId, type: data.type, version: data.version, token: data.token, captchaKey: data.captchaKey, iv: data.iv, referer, fetchedAt: Date.now() }
       markDirty()
       return { shadeOut: path.resolve(ctx.args["shade-out"]), cutoutOut: path.resolve(ctx.args["cutout-out"]), predicted, pending: true }
@@ -506,7 +495,6 @@ export const COMMANDS = [
     async run() { return captchaModelStatus() },
   },
 
-  // ─── cloud ─────────────────────────────────────────────────────────── //
   {
     name: "cloud upload", summary: "上传图片到学习通云盘,返回 objectId", auth: true, sideEffect: true,
     args: [s("file", "本地图片路径", { required: true })],
@@ -519,7 +507,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── face ──────────────────────────────────────────────────────────── //
   {
     name: "face profile", summary: "获取账号已设置的人脸识别照片", auth: true,
     async run(ctx) {
@@ -568,13 +555,12 @@ export const COMMANDS = [
       if (ctx.args["object-id"]) idx = cfg.images.findIndex((i) => i.objectId === ctx.args["object-id"])
       if (idx === undefined || idx < 0 || idx >= cfg.images.length) throw notFound("找不到该人脸照片")
       const [rm] = cfg.images.splice(idx, 1)
-      try { fs.unlinkSync(path.join(faceDir(), `${rm.objectId}.jpg`)) } catch { /* ignore */ }
+      try { fs.unlinkSync(path.join(faceDir(), `${rm.objectId}.jpg`)) } catch {}
       markDirty()
       return { removed: rm.objectId, remaining: cfg.images.length }
     },
   },
 
-  // ─── schedule ──────────────────────────────────────────────────────── //
   {
     name: "schedule refresh", summary: "从学习通刷新课表并缓存", auth: true,
     async run(ctx) {
@@ -616,7 +602,7 @@ export const COMMANDS = [
             try {
               const { activities } = await api.getActivities(c, course)
               for (const a of activities) if (a.isRecent) out.push({ ...a, courseName: course.courseName, lesson: lesson.courseName })
-            } catch { /* ignore */ }
+            } catch {}
           }
         }
         const seen = new Set()
@@ -625,7 +611,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── im ────────────────────────────────────────────────────────────── //
   {
     name: "im groups", summary: "列出环信课程群聊", auth: true, paged: true,
     async run(ctx) {
@@ -646,7 +631,7 @@ export const COMMANDS = [
         else groups = groups.slice(0, ctx.args["max-groups"] ?? 50)
         const all = []
         for (const g of groups) {
-          try { all.push(...await api.fetchGroupSignActivities(im, g)) } catch { /* ignore */ }
+          try { all.push(...await api.fetchGroupSignActivities(im, g)) } catch {}
         }
         const by = new Map()
         for (const a of all) if (!by.has(a.activeId)) by.set(a.activeId, a)
@@ -655,7 +640,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── users(代签) ───────────────────────────────────────────────────── //
   {
     name: "users list", summary: "列出代签用户", auth: false, paged: true,
     async run() {
@@ -679,7 +663,8 @@ export const COMMANDS = [
       applyClientPreferences()
       let password = ctx.args.password
       if (ctx.args["password-stdin"]) password = (await readStdin()) || password
-      if (!password) throw usage("缺少密码")
+      if (!password && process.env.CXSIGN_PASSWORD) password = process.env.CXSIGN_PASSWORD
+      if (!password) throw usage("缺少密码:用 --password-stdin 或环境变量 CXSIGN_PASSWORD")
       if (!ctx.args.encrypted) checkPassword(password)
       const enc = ctx.args.encrypted ? password : encryptByAES(password)
       if (load().otherUsers.some((u) => u.phoneNumber === ctx.args.phone)) throw usage("该手机号已在代签列表中")
@@ -731,7 +716,7 @@ export const COMMANDS = [
             fs.mkdirSync(faceDir(), { recursive: true, mode: 0o700 })
             fs.writeFileSync(path.join(faceDir(), `${oid}.jpg`), buf, { mode: 0o600 })
             cfg.images.push({ objectId: oid, useCount: 0, isFailureBefore: false })
-          } catch { /* 跳过坏图 */ }
+          } catch {}
         }
       }
       markDirty()
@@ -814,7 +799,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── locations ─────────────────────────────────────────────────────── //
   {
     name: "locations list", summary: "列出收藏的签到位置", auth: false, paged: true,
     async run() { return load().locations },
@@ -856,7 +840,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── device-code ───────────────────────────────────────────────────── //
   {
     name: "device-code show", summary: "查看当前设备码长度(不打印明文)", auth: false,
     async run(ctx) {
@@ -877,7 +860,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── rank ──────────────────────────────────────────────────────────── //
   {
     name: "rank summary", summary: "公开排行榜总人数 / 总签到次数(免登录)", auth: false,
     async run() { return api.rankSummary() },
@@ -928,7 +910,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── banlist / sponsors ────────────────────────────────────────────── //
   {
     name: "banlist", summary: "获取被封禁的学校 fid 列表(公开)", auth: false,
     async run() {
@@ -944,7 +925,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── config / stats ────────────────────────────────────────────────── //
   {
     name: "config get", summary: "查看本地配置", auth: false,
     async run() {
@@ -997,7 +977,6 @@ export const COMMANDS = [
     },
   },
 
-  // ─── capabilities ──────────────────────────────────────────────────── //
   {
     name: "capabilities", summary: "列出已实现的能力与可选依赖状态", auth: false,
     async run() {

@@ -1,7 +1,3 @@
-/**
- * 离线单元测试:加解密、参数解析、二维码、打码、课表、错误码。
- * 不触网、不登录。
- */
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import crypto from "node:crypto"
@@ -25,7 +21,6 @@ describe("cxcrypto", () => {
   it("AES login encrypt/decrypt roundtrip", () => {
     const c = encryptByAES("13800138000")
     assert.equal(decryptByAES(c), "13800138000")
-    // + 在 Base64 里会出现,登录时要替换成 %2B
     assert.match(encryptByAES("abcdefgh"), /[A-Za-z0-9+/=]+/)
   })
   it("DES ECB matches OpenSSL for IM password", () => {
@@ -131,8 +126,8 @@ describe("course / activity parsing", () => {
   it("parseCourseList filters and maps", () => {
     const list = parseCourseList([
       { cataName: "x", content: { id: 1, course: { data: [{ id: 10, name: "A", teacherfactor: "T", imageurl: "u", schools: "S" }] } } },
-      { content: { id: 2, course: { data: [{ id: 20, name: "B" }] } } }, // no cataName
-      { cataName: "y", content: { id: 3 } }, // no course
+      { content: { id: 2, course: { data: [{ id: 20, name: "B" }] } } },
+      { cataName: "y", content: { id: 3 } },
     ])
     assert.equal(list.length, 1)
     assert.deepEqual(list[0], { courseName: "A", teacher: "T", courseId: 10, classId: 1, imageUrl: "u", schools: "S" })
@@ -175,7 +170,7 @@ describe("schedule helpers", () => {
   })
   it("currentWeekOfSemester", () => {
     assert.equal(currentWeekOfSemester(0), 1)
-    const first = Date.UTC(2026, 0, 5) // Mon
+    const first = Date.UTC(2026, 0, 5)
     assert.equal(currentWeekOfSemester(first, new Date(Date.UTC(2026, 0, 5))), 1)
     assert.equal(currentWeekOfSemester(first, new Date(Date.UTC(2026, 0, 12))), 2)
   })
@@ -200,7 +195,6 @@ describe("location randomization", () => {
 
 describe("IM protobuf / attachment", () => {
   it("pbFields roundtrips a KeyValue-like buffer", () => {
-    // key=1:"attachment" (tag 0x0a) + stringValue=6:"{}" (tag 0x32)
     const buf = Buffer.concat([
       Buffer.from([0x0a, 10]), Buffer.from("attachment"),
       Buffer.from([0x32, 2]), Buffer.from("{}"),
@@ -260,7 +254,6 @@ describe("CLI run (offline)", () => {
     assert.match(r.stdout, /AUTH_REQUIRED/)
   })
   it("sign location dry-run → 10", async () => {
-    // seed a fake session so auth gate passes... actually sign is sideEffect so dry-run fires first
     resetCache()
     const r = await run(["sign", "location", "--active", "1", "--class", "2", "--course", "3", "--lat", "1", "--lon", "2", "--json"])
     assert.equal(r.exitCode, 10)
@@ -289,7 +282,6 @@ describe("CLI run (offline)", () => {
     assert.equal(JSON.parse(list.stdout).data.length, 1)
   })
   it("device-code reset is dry-run by default", async () => {
-    // need a session for resolveClient... seed loginSession
     resetCache()
     const stPath = path.join(HOME, "state.json")
     fs.mkdirSync(HOME, { recursive: true })

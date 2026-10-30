@@ -1,7 +1,3 @@
-/**
- * 公开只读接口的 live 测试。不登录、不写。
- * 网络失败时标记为 skip(不是 fail),避免 CI 因 CDN 抖动红。
- */
 import { describe, it } from "node:test"
 import assert from "node:assert/strict"
 import os from "node:os"
@@ -20,13 +16,12 @@ async function live(argv) {
 }
 
 function statsReset() {
-  // main.run already resets via stats object mutation in main(); nothing else needed
 }
 
 describe("live read-only", () => {
   it("rank summary", async () => {
     const r = await live(["rank", "summary"])
-    if (r.exitCode === 5) return // network → soft skip
+    if (r.exitCode === 5) return
     assert.equal(r.exitCode, 0, r.stdout + r.stderr)
     const d = JSON.parse(r.stdout).data
     assert.ok(d.userCount > 0)
@@ -49,7 +44,6 @@ describe("live read-only", () => {
   })
   it("banlist (CDN may 5xx)", async () => {
     const r = await live(["banlist"])
-    // CDN 有时 500,接受 0 或 6
     assert.ok([0, 5, 6].includes(r.exitCode), r.stdout + r.stderr)
   })
   it("sponsors (CDN may 5xx)", async () => {

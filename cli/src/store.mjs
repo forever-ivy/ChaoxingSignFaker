@@ -1,7 +1,3 @@
-/**
- * CLI 持久化:单个 JSON 文件,结构对应 app/src/main/proto/datastore.proto 的 ChaoxingSignFakerDataStore。
- * 目录 0700、文件 0600、原子写入。含会话 cookie、AES 加密后的密码,永远不会被打印。
- */
 import fs from "node:fs"
 import os from "node:os"
 import path from "node:path"
@@ -20,13 +16,13 @@ export function faceDir() {
 export function emptyState() {
   return {
     version: 1,
-    loginSession: null, // {phoneNumber,password(AES),cookies[],configuredFid,puid,uid,name,deviceCode,isNotRandomizedDeviceCode,isDeviceCodeDuplicatedSignBefore,user{...}}
-    otherUsers: [], // 同上 + tags[] + isObsoleteSession
-    tagsLibrary: [], // {id,name,color}
-    locations: [], // {address,label,latitude,longitude}
-    classRememberedLocation: {}, // classId -> location
+    loginSession: null,
+    otherUsers: [],
+    tagsLibrary: [],
+    locations: [],
+    classRememberedLocation: {},
     classSelectedLocation: {},
-    faceRecognitionConfigures: {}, // phone -> {images:[{objectId,useCount,isFailureBefore}]}
+    faceRecognitionConfigures: {},
     analysis: { locationSign: 0, qrcodeSign: 0, photoSign: 0, clickSign: 0, gestureSign: 0, otherUserSign: 0, passwordSign: 0 },
     analysisUUID: "",
     analysisRankName: "",
@@ -39,12 +35,12 @@ export function emptyState() {
     preferGroupId: [],
     classSchedule: { lessons: [], lastFetchTimestamp: 0, firstWeekDate: 0, contentMd5: "" },
     preferences: { customizedUserAgent: "", customizedPackageName: "", clientIdentity: "", alwaysForceSign: false, isIgnoreAllConsistentDeviceCodeComponents: false },
-    pending: {}, // 跨进程的人工步骤(滑块验证码)
+    pending: {},
   }
 }
 
 let cache = null
-let dirty = false
+let isDirty = false
 
 export function load() {
   if (cache) return cache
@@ -58,34 +54,35 @@ export function load() {
   return cache
 }
 
-export function markDirty() { dirty = true }
+export function markDirty() { isDirty = true }
 
-/** 修改并标脏 */
 export function update(fn) {
   const st = load()
   const r = fn(st)
-  dirty = true
+  isDirty = true
   return r
 }
 
 export function flush() {
-  if (!dirty || !cache) return
+  if (!isDirty || !cache) return
   const dir = stateDir()
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 })
-  try { fs.chmodSync(dir, 0o700) } catch { /* ignore */ }
+  try { fs.chmodSync(dir, 0o700) } catch {}
   const tmp = path.join(dir, `.state.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`)
   fs.writeFileSync(tmp, JSON.stringify(cache), { mode: 0o600 })
   fs.renameSync(tmp, statePath())
   fs.chmodSync(statePath(), 0o600)
-  dirty = false
+  isDirty = false
 }
 
-/** 仅测试用 */
-export function resetCache() { cache = null; dirty = false }
+export function resetCache() { cache = null; isDirty = false }
 
-/** 写一个 0600 的文件(用于分享链接等敏感输出) */
 export function writeSecretFile(file, content) {
-  fs.mkdirSync(path.dirname(path.resolve(file)), { recursive: true })
-  fs.writeFileSync(file, content, { mode: 0o600 })
-  fs.chmodSync(file, 0o600)
+  const target = path.resolve(file)
+  const dir = path.dirname(target)
+  fs.mkdirSync(dir, { recursive: true })
+  const tmp = path.join(dir, `.${path.basename(target)}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`)
+  const fd = fs.openSync(tmp, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600)
+  const isWritten = (() => { try { fs.fchmodSync(fd, 0o600); fs.writeFileSync(fd, content); return true } finally { fs.closeSync(fd) } })()
+  if (isWritten) fs.renameSync(tmp, target)
 }

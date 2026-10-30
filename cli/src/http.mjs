@@ -1,17 +1,8 @@
-/**
- * HTTP 传输 + 学习通会话 cookie 规则。
- * 对应 api/ChaoxingHttpClient.kt create() 里的 CookieJar 与 UA 拦截器:
- *  - *.chaoxing.com 的请求统一带「学习通会话」cookie;
- *  - /fanyalogin 的响应整体替换会话,/apis/login/userLogin4Uname.do 的响应合并进会话;
- *  - 其他主机按 host 单独存(不持久化)。
- * 额外:超时、GET 指数退避重试、手动跟随重定向、verbose 摘要日志(打码,不含 cookie / 请求体)。
- */
 import { CxError, scrubString } from "./errors.mjs"
 
 export const DEFAULT_USER_AGENT =
   "Dalvik/2.1.0 (Linux; U; Android 12; SM-N9006 Build/8aba9e4.0) (schild:2d97f7b9439f21333c946878fc4d6ccb) (device:SM-N9006) Language/zh_CN com.chaoxing.mobile/ChaoXingStudy_3_6.7.5_android_phone_10941_314 (@Kalimdor)_68f184fd763546c1a04ab3a09b3deebb"
 
-/** components/CustomizeClientCard.kt ChaoxingClientInfo */
 export const CLIENT_INFOS = {
   "@@default": { name: "学习通", userAgent: DEFAULT_USER_AGENT, packageName: "com.chaoxing.mobile" },
   "@@xuezaixidian": {
@@ -24,7 +15,6 @@ export const CLIENT_INFOS = {
 export const options = { timeoutMs: 15000, retries: 2, verbose: false, userAgent: DEFAULT_USER_AGENT }
 export const stats = { requests: 0, retries: 0 }
 
-/** 测试可替换 */
 export const transport = { fetch: (...a) => globalThis.fetch(...a) }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
@@ -57,7 +47,6 @@ const isChaoxing = (host) => host === "chaoxing.com" || host.endsWith(".chaoxing
 
 export class CookieSession {
   constructor(cookies = []) {
-    /** 学习通会话:[{host,name,value}](对应 datastore HttpCookie) */
     this.chaoxing = cookies.map((c) => ({ ...c }))
     this.others = new Map()
   }
@@ -79,7 +68,6 @@ export class CookieSession {
       this.others.set(u.hostname, parsed)
     }
   }
-  /** ChaoxingHttpClient.updateConfiguredFid:只改已有的 fid cookie */
   setFid(fid) {
     for (const c of this.chaoxing) if (c.name === "fid") c.value = String(fid)
   }
@@ -97,15 +85,11 @@ function buildUrl(url, query) {
   return u.toString()
 }
 
-/**
- * @param {CookieSession|null} jar
- * @param {{method?:string,url:string,query?:object,form?:string|URLSearchParams,body?:any,headers?:object,contentType?:string,followRedirects?:boolean,ua?:string}} req
- */
 export async function request(jar, req) {
   const method = (req.method ?? "GET").toUpperCase()
   let url = buildUrl(req.url, req.query)
-  const idempotent = method === "GET" && !req.noRetry
-  const maxAttempts = idempotent ? Math.max(0, options.retries) + 1 : 1
+  const isIdempotent = method === "GET" && !req.noRetry
+  const maxAttempts = isIdempotent ? Math.max(0, options.retries) + 1 : 1
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const started = Date.now()
@@ -140,7 +124,7 @@ export async function request(jar, req) {
           continue
         }
         const buf = Buffer.from(await resp.arrayBuffer())
-        if (idempotent && resp.status >= 502 && resp.status <= 504 && attempt < maxAttempts) {
+        if (isIdempotent && resp.status >= 502 && resp.status <= 504 && attempt < maxAttempts) {
           stats.retries++
           await sleep(400 * 2 ** (attempt - 1))
           throw Object.assign(new Error("retry"), { __retry: true })
@@ -175,7 +159,6 @@ export async function request(jar, req) {
   throw new CxError("NETWORK_ERROR", `网络连接异常: ${lastErr?.cause?.code ?? lastErr?.message ?? lastErr} (${redactUrl(url)})`)
 }
 
-/** utilities/ChaoxingResponseHelper.kt checkResponseThrowException */
 export function checkResponse(resp) {
   if (resp.ok) return resp
   if (resp.status === 429) throw new CxError("RATE_LIMITED", "请求过于频繁(HTTP 429)", { status: 429 }, 429)
@@ -183,7 +166,6 @@ export function checkResponse(resp) {
   throw new CxError(resp.status === 404 ? "DATA_NOT_FOUND" : "BACKEND_BUSINESS_ERROR", msg, { status: resp.status, url: redactUrl(resp.url), snippet: scrubString(resp.text.slice(0, 200)) }, resp.status)
 }
 
-/** 去掉 JSONP 包装 cx_captcha_function(...) */
 export function unwrapJsonp(text) {
   return JSON.parse(text.replace("cx_captcha_function(", "").replace(/\)\s*$/, ""))
 }

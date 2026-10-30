@@ -1,8 +1,3 @@
-/**
- * 图像解码 + 二维码识别 + 滑块验证码模型推理。
- * - 验证码:移植 api/ChaoxingCaptchaPredictor.kt(captcha.ort,640 输入,补成正方形,RGB/255,NMS 0.45,score 0.25,x - 4)
- * - 二维码图片:jsQR(App 用 ML Kit 扫码,这里离线识别图片文件)
- */
 import fs from "node:fs"
 import path from "node:path"
 import { fileURLToPath } from "node:url"
@@ -16,7 +11,6 @@ function optional(name) {
   try { return require(name) } catch { return null }
 }
 
-/** 解码 JPEG / PNG → {width,height,data(RGBA)} */
 export function decodeImage(buf) {
   if (buf[0] === 0x89 && buf[1] === 0x50) {
     const png = optional("pngjs")
@@ -43,7 +37,6 @@ export function decodeQRCodeImage(buf) {
   return r.data
 }
 
-// ─── 验证码模型 ──────────────────────────────────────────────────────── //
 
 const MODEL_INPUT_SIZE = 640
 const SCORE_THRESHOLD = 0.25
@@ -52,7 +45,6 @@ const EDGE_OFFSET = 4
 
 export function modelPath() {
   if (process.env.CXSIGN_ORT_MODEL) return process.env.CXSIGN_ORT_MODEL
-  // 复用 App 自带的模型:cli/src → ../../app/src/main/assets/captcha.ort
   return path.resolve(here, "..", "..", "app", "src", "main", "assets", "captcha.ort")
 }
 
@@ -62,7 +54,6 @@ export function captchaModelStatus() {
   return { runtime: ort ? "onnxruntime-node" : null, modelPath: p, modelExists: fs.existsSync(p), available: !!ort && fs.existsSync(p) }
 }
 
-/** 等价于 Canvas 画到 padded 正方形 + Bitmap.scale(双线性),输出 CHW float32 */
 export function preprocess(img) {
   const padded = Math.max(img.width, img.height)
   const S = MODEL_INPUT_SIZE
@@ -103,7 +94,6 @@ export function nms(dets) {
   return kept
 }
 
-/** 输出 [1, 5, N] → 最佳缺口 x(原图像素) */
 export function postprocess(data, n, padded) {
   const dets = []
   for (let i = 0; i < n; i++) {

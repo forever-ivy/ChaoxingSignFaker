@@ -1,6 +1,3 @@
-/**
- * 账号会话,对应 api/ChaoxingHttpClient.kt(主账号)与 ChaoxingOtherUserHelper / ChaoxingHttpRequester(代签用户)。
- */
 import crypto from "node:crypto"
 import { CxError, maskPhone } from "./errors.mjs"
 import { CookieSession, checkResponse, request, CLIENT_INFOS, options } from "./http.mjs"
@@ -10,13 +7,11 @@ import { load, markDirty } from "./store.mjs"
 export const URL_LOGIN = "https://passport2.chaoxing.com/fanyalogin"
 export const URL_USER_INFO = "https://sso.chaoxing.com/apis/login/userLogin4Uname.do"
 
-/** checkPasswordIllegalThrowException */
 export function checkPassword(password) {
   if (!password) throw new CxError("USAGE", "密码不能为空")
   if (password.length < 8 || password.length > 16) throw new CxError("USAGE", "密码位数应该在8-16位")
 }
 
-/** fanyalogin 表单(addEncoded 原样拼接,只替换 + 与空格) */
 export function buildLoginForm(phone, encryptedPassword) {
   const uname = encryptByAES(phone).replace(/\+/g, "%2B")
   const pwd = encryptedPassword.replace(/\+/g, "%2B").replace(/%20/g, "%2B").replace(/ /g, "%2B")
@@ -26,7 +21,6 @@ export function buildLoginForm(phone, encryptedPassword) {
   ].join("&")
 }
 
-/** 解析 userLogin4Uname 返回的 msg(getInfoWithIdentity + parseFidList) */
 export function parseUserInfo(json) {
   const m = json?.msg
   if (!m || typeof m !== "object" || m.uid === undefined) return null
@@ -52,7 +46,6 @@ export function parseUserInfo(json) {
 }
 
 export class Client {
-  /** @param {object} record store 里的 loginSession 或 otherUsers[i] */
   constructor(record, { isSelf }) {
     this.record = record
     this.isSelf = isSelf
@@ -85,7 +78,6 @@ export class Client {
     if (JSON.stringify(next) !== JSON.stringify(this.record.cookies ?? [])) { this.record.cookies = next; markDirty() }
   }
 
-  /** login():用(已加密的)密码登录并替换会话 cookie */
   async login(encryptedPassword) {
     const res = await this.req({ method: "POST", url: URL_LOGIN, form: buildLoginForm(this.phone, encryptedPassword) })
     checkResponse(res)
@@ -100,13 +92,12 @@ export class Client {
     return true
   }
 
-  /** getInfoWithIdentity:POST 加密的设备信息,拿到 uid/puid/fid 列表/IM 密码/clientId */
   async getInfo() {
     const pkg = load().preferences.customizedPackageName || "com.chaoxing.mobile"
     const res = await this.req({ method: "POST", url: URL_USER_INFO, form: new URLSearchParams({ data: buildEncryptedDeviceInfo(this.record.androidId, pkg) }).toString() })
     checkResponse(res)
     let user = null
-    try { user = parseUserInfo(JSON.parse(res.text)) } catch { /* ignore */ }
+    try { user = parseUserInfo(JSON.parse(res.text)) } catch {}
     if (!user) throw new CxError("AUTH_SESSION_EXPIRED", this.isSelf ? "获取用户信息失败,会话可能已过期" : "获取代签用户信息失败", { account: maskPhone(this.phone) })
     this.record.user = user
     this.record.name = user.name
@@ -118,7 +109,6 @@ export class Client {
     return user
   }
 
-  /** reLogin:用保存的加密密码重新登录 */
   async relogin() {
     if (!this.record.password) throw new CxError("AUTH_SESSION_EXPIRED", "会话已过期且没有保存密码", { next: this.isSelf ? "cxsign auth login --phone <手机号> --password-stdin" : `cxsign users relogin --phone ${this.phone} --password-stdin` })
     await this.login(this.record.password)
@@ -135,7 +125,6 @@ export class Client {
   }
 }
 
-/** 应用客户端配置(UA)。preferences.clientIdentity: @@default / @@xuezaixidian / @@custom */
 export function applyClientPreferences() {
   const p = load().preferences
   if (p.clientIdentity === "@@custom" && p.customizedUserAgent) options.userAgent = p.customizedUserAgent
@@ -155,13 +144,11 @@ export function otherClient(phone) {
   return new Client(rec, { isSelf: false })
 }
 
-/** 解析 --as:self / 手机号 */
 export function resolveClient(as) {
   if (!as || as === "self" || as === load().loginSession?.phoneNumber) return selfClient()
   return otherClient(as)
 }
 
-/** 确保拿到用户信息(首次登录后 user 已有;否则请求一次) */
 export async function ensureUser(client) {
   if (!client.record.cookies?.length) {
     if (client.record.password) { await client.relogin(); return client }

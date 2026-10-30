@@ -1,15 +1,6 @@
-/**
- * 结构化错误 + 输出打码。
- * 对应 Kotlin 侧 utilities/ChaoxingPredictableException.kt 及各 signer 中的异常类型。
- */
 import { CODE_EXIT, RETRYABLE } from "./spec.mjs"
 
 export class CxError extends Error {
-  /**
-   * @param {string} code 见 spec.mjs CODE_EXIT
-   * @param {string} message 人类可读(中文,沿用 App 的提示文案)
-   * @param {object} [details]
-   */
   constructor(code, message, details, status) {
     super(message)
     this.name = "CxError"
@@ -22,9 +13,7 @@ export class CxError extends Error {
 const SECRET_KEYS = /^(password|passwd|pwd|encryptedpassword|impassword|imencryptedpassword|cookie|cookies|set-cookie|token|_token|access_token|accesstoken|cloudtoken|enc|enc2|faceenc|validate|clientid|shareurl|secret|signtoken|sc|authorization)$/i
 
 const SECRET_RE = [
-  // query 参数
   /([?&](?:pwd|password|uname|enc|enc2|validate|token|_token|faceEnc|signCode|dc|captchaKey|iv)=)[^&\s"']+/gi,
-  // Cookie 片段
   /\b((?:JSESSIONID|UID|_uid|_d|vc3|uf|cx_p_token|p_auth_token|xxtenc|fid|_dfp|DSSTASH_LOG|route|spaceFid|spaceRoleId|lv|_tid|sso_puid)=)[^;\s"']+/g,
   /(Bearer\s+)[A-Za-z0-9._-]+/g,
 ]
@@ -35,7 +24,6 @@ export function scrubString(s) {
   return out
 }
 
-/** 递归打码:敏感字段整体替换为 "***",字符串里内嵌的 token/cookie 也替换。 */
 export function scrub(v) {
   if (typeof v === "string") return scrubString(v)
   if (Array.isArray(v)) return v.map(scrub)

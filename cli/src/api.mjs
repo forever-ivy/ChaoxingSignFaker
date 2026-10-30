@@ -1,13 +1,8 @@
-/**
- * 学习通协议:课程 / 活动 / 签到信息 / 签到 / 验证码 / 人脸 / 云盘 / 课表 / 群聊 / 排行榜。
- * 每个函数都标注了对应的 Kotlin 源(app/src/main/java/org/aquamarine5/brainspark/chaoxingsignfaker/...)。
- */
 import crypto from "node:crypto"
 import { CxError, scrubString } from "./errors.mjs"
 import { checkResponse, request, unwrapJsonp } from "./http.mjs"
 import { buildFaceResult, md5, resolveImPassword } from "./cxcrypto.mjs"
 
-// ─── api/ChaoxingCourseHelper.kt ─────────────────────────────────────── //
 
 export const URL_COURSE_LIST = "https://mooc1-api.chaoxing.com/mycourse/backclazzdata?view=json&rss=1"
 export const URL_CLASS_NAME = "https://mooc1-api.chaoxing.com/gas/clazz?fields=name&view=json"
@@ -27,7 +22,6 @@ async function courseListJson(client) {
   return j
 }
 
-/** parseCourseListData */
 export function parseCourseList(channelList) {
   const out = []
   for (const c of channelList) {
@@ -72,7 +66,6 @@ export async function queryClassName(client, classId) {
   return res.json()?.data?.[0]?.name ?? null
 }
 
-// ─── api/ChaoxingActivityHelper.kt ───────────────────────────────────── //
 
 export const URL_ACTIVITY_LOAD = "https://mobilelearn.chaoxing.com/v2/apis/active/student/activelist?fid=0&showNotStartedActive=0"
 export const NO_SIGN_OFF_EVENT = 4999
@@ -80,7 +73,6 @@ export const AVAILABLE_INTERVAL = 20 * 60 * 1000
 
 export const SIGN_TYPES = { "0": "photo", "2": "qrcode", "3": "gesture", "4": "location", "5": "password" }
 export const SIGN_TYPE_NAMES = { photo: "拍照/普通签到", qrcode: "二维码签到", gesture: "手势签到", location: "位置签到", password: "签到码签到" }
-/** ChaoxingSignHelper.getIMSignDestination 的 atypeName 映射 */
 export const ATYPE_NAME_TO_TYPE = { 密码签到: "password", 签到码签到: "password", 位置签到: "location", 二维码签到: "qrcode", 拍照签到: "photo", 手势签到: "gesture" }
 
 async function activityListJson(client, classId, courseId) {
@@ -126,7 +118,6 @@ export async function getActivities(client, course) {
   return parseActivityList(await activityListJson(client, course.classId, course.courseId), course)
 }
 
-// ─── signer/ChaoxingSigner.kt ────────────────────────────────────────── //
 
 export const URL_PRESIGN = "https://mobilelearn.chaoxing.com/newsign/preSign"
 export const URL_SIGN_INFO = "https://mobilelearn.chaoxing.com/v2/apis/active/getPPTActiveInfo"
@@ -143,7 +134,6 @@ const SIGNED_STATUSES = new Set([1, 2, 3, 9])
 const PRIMARY_ATTEND_STATUS_PATTERN = /"primaryAttend"\s*:\s*\{[^{}]*?"status"\s*:\s*(\d+)/
 const SIGN_STATUS_PATTERN = /signstatus\s*=\s*(\d+)/
 
-/** checkAlreadySign */
 export function checkAlreadySign(body) {
   const m = PRIMARY_ATTEND_STATUS_PATTERN.exec(body) ?? SIGN_STATUS_PATTERN.exec(body)
   if (m) return SIGNED_STATUSES.has(Number(m[1]))
@@ -159,7 +149,6 @@ export async function getSignInfo(client, activeId) {
   return j.data
 }
 
-/** 把 getPPTActiveInfo 的原始 data 整理成 agent 友好的结构 */
 export function describeSignInfo(d) {
   const endTime = d.endTime ?? d.endtime ?? null
   const signOutTs = d.signOutPublishTimeStamp
@@ -192,7 +181,6 @@ export function describeSignInfo(d) {
   }
 }
 
-/** ChaoxingLocationSignEntity:±0.00005 随机化,位置错误后收紧到 ±0.00001 */
 export class SignLocation {
   constructor(latitude, longitude, address) {
     this.latitude = Number(latitude); this.longitude = Number(longitude); this.address = address ?? ""
@@ -229,7 +217,6 @@ export class Signer {
     return this.info
   }
 
-  /** preSign + postAnalysis:返回 READY_TO_SIGN / EXPIRED / ALREADY_SIGNED。会自动重登一次。 */
   async preSign() {
     const send = () => this.client.req({ method: "POST", url: this.preSignUrl(), form: `ext=${this.ext}` })
     let res = await send()
@@ -255,7 +242,6 @@ export class Signer {
     await this.client.req({ url: URL_ANALYSIS2, query: { code: m[1] } })
   }
 
-  /** checkSignStatusThrowException */
   async checkSignStatus() {
     const st = await this.preSign()
     if (st === "EXPIRED") throw new CxError("SIGN_EXPIRED", "签到已截止")
@@ -264,7 +250,6 @@ export class Signer {
     return st
   }
 
-  // ── 验证码(getCaptchaConf / getCaptchaImageV2 / checkCaptchaResult) ──
   async getCaptchaImage() {
     return getCaptchaImage(this.client.jar, this.preSignUrl())
   }
@@ -272,7 +257,6 @@ export class Signer {
     return checkCaptchaResult(this.client.jar, x, data, this.preSignUrl())
   }
 
-  // ── 人脸参数 addFaceRecognitionParameter ──
   async faceParams(objectId, courseAlreadyAdded) {
     if (!objectId) return {}
     const p = { currentFaceId: objectId, ifCFP: "0" }
@@ -290,7 +274,6 @@ export class Signer {
     return JSON.stringify(o)
   }
 
-  /** 发送 stuSignajax。params 为有序的 [k,v] 列表;undefined 值会被跳过 */
   async sendSign(pairs, pos) {
     const u = new URL(URL_SIGN)
     for (const [k, v] of pairs) if (v !== undefined && v !== null) u.searchParams.append(k, String(v))
@@ -299,7 +282,6 @@ export class Signer {
     return this.checkSignResult(res.text, pos)
   }
 
-  /** checkSignResult:true = 需要验证码(signEnc2 已更新),false = 成功 */
   checkSignResult(result, pos) {
     if (result.startsWith("[face]")) throw new CxError("SIGN_FACE_ERROR", result.slice(6) || "人脸识别失败")
     if (result === "success2") throw new CxError("SIGN_ENDED", "迟到或签到已结束")
@@ -324,7 +306,6 @@ export class Signer {
     return false
   }
 
-  /** ChaoxingLocationSigner.sign */
   async signLocation(pos, { validate, faceObjectId } = {}) {
     const c = this.client
     const pairs = [
@@ -337,7 +318,6 @@ export class Signer {
     return this.sendSign(pairs, pos)
   }
 
-  /** ChaoxingPasswordSigner.sign / ChaoxingGestureSigner.sign(签到码 / 手势序列) */
   async signCode(signCode, pos, { validate } = {}) {
     const c = this.client
     const pairs = [
@@ -349,7 +329,6 @@ export class Signer {
     return this.sendSign(pairs, pos)
   }
 
-  /** ChaoxingPhotoSigner.signByClick / signByImage */
   async signPhoto(objectId, { validate } = {}) {
     const c = this.client
     const pairs = [
@@ -359,7 +338,6 @@ export class Signer {
     return this.sendSign(pairs)
   }
 
-  /** ChaoxingQRCodeSigner.sign */
   async signQRCode(parsed, pos, { validate, faceObjectId } = {}) {
     const c = this.client
     const pairs = [
@@ -372,7 +350,6 @@ export class Signer {
     return this.sendSign(pairs, pos)
   }
 
-  /** isQRCodeExpired */
   async isQRCodeExpired(parsed) {
     return isQRCodeExpired(this.client, parsed, this.activeId)
   }
@@ -384,7 +361,6 @@ export async function checkSignCode(client, activeId, signCode) {
   return res.json()?.result === 1
 }
 
-// ─── signer/ChaoxingQRCodeSigner.kt parseQRCode ──────────────────────── //
 
 export function parseQRCode(raw) {
   const rawValue = String(raw ?? "").trim()
@@ -425,7 +401,6 @@ export async function isQRCodeExpired(client, parsed, fallbackActiveId) {
   }
 }
 
-// ─── 滑块验证码 ─────────────────────────────────────────────────────── //
 
 export async function getCaptchaConf(jar) {
   const res = await request(jar, { url: URL_CAPTCHA_CONF, query: { captchaId: CAPTCHA_ID, _: Date.now() } })
@@ -433,7 +408,6 @@ export async function getCaptchaConf(jar) {
   return Number(unwrapJsonp(res.text).t)
 }
 
-/** getCaptchaImageV2:返回 ChaoxingCaptchaDataEntity */
 export async function getCaptchaImage(jar, referer) {
   const t = await getCaptchaConf(jar)
   const type = "slide"
@@ -451,7 +425,6 @@ export async function getCaptchaImage(jar, referer) {
   return { captchaId: CAPTCHA_ID, type, version: "1.1.20", token: j.token, captchaKey, iv, shadeImageUrl: vo.shadeImage, cutoutImageUrl: vo.cutoutImage }
 }
 
-/** 返回 validate 字符串;null 表示位置不对 */
 export async function checkCaptchaResult(jar, x, data, referer) {
   const res = await request(jar, {
     url: URL_CAPTCHA_RESULT,
@@ -469,7 +442,6 @@ export async function checkCaptchaResult(jar, x, data, referer) {
   return null
 }
 
-// ─── api/ChaoxingFaceHelper.kt ───────────────────────────────────────── //
 
 export const URL_SHARED_IMAGE = (objectId) => `https://p.cldisk.com/star4/${objectId}/origin.jpg`
 export const URL_GET_PROFILE_FACE_IMAGE = "https://mobilelearn.chaoxing.com/v2/apis/sign/collectionfilephotoEnc?DB_STRATEGY=DEFAULT"
@@ -499,7 +471,6 @@ export async function downloadSharedImage(objectId) {
   return res.buf
 }
 
-// ─── api/ChaoxingCloudDriveHelper.kt ─────────────────────────────────── //
 
 export const URL_CLOUD_TOKEN = "https://pan-yz.chaoxing.com/api/token/uservalid"
 export const URL_CLOUD_UPLOAD = "https://pan-yz.chaoxing.com/upload?_from=mobilelearn&_token="
@@ -512,7 +483,6 @@ export async function getCloudToken(client) {
   return t
 }
 
-/** uploadImage:multipart puid + file(jpg),返回 objectId */
 export async function uploadImage(client, buffer, filename = `${crypto.randomUUID()}.jpg`) {
   const token = await getCloudToken(client)
   const fd = new FormData()
@@ -525,7 +495,6 @@ export async function uploadImage(client, buffer, filename = `${crypto.randomUUI
   return id
 }
 
-// ─── api/ChaoxingLessonHelper.kt ─────────────────────────────────────── //
 
 export const URL_MY_LESSONS = "https://kb.chaoxing.com/pc/curriculum/getMyLessons"
 
@@ -603,7 +572,6 @@ export function isCourseNameMatched(lessonName, courseName) {
   return bigramSimilarity(l, c) >= 0.5
 }
 
-// ─── api/ChaoxingIMHelper.kt(环信) ─────────────────────────────────── //
 
 export const URL_EASEMOB_IM_TOKEN = "https://a1-vip6.easemob.com/cx-dev/cxstudy/token"
 export const URL_EASEMOB_IM_JOINED_GROUPS = (u) => `https://a1-vip6.easemob.com/cx-dev/cxstudy/users/${u}/joined_chatgroups?detail=true&version=v3&pagenum=1&pagesize=200`
@@ -632,12 +600,11 @@ export async function getEasemobGroups(im) {
       const desc = JSON.parse(g.description)
       const name = g.name && String(g.name).trim() ? g.name : desc.courseInfo.coursename
       out.push({ groupId: g.id, name, imageUrl: desc.courseInfo?.imageUrl ?? null })
-    } catch { /* 非课程群跳过,与 App 一致 */ }
+    } catch {}
   }
   return out
 }
 
-/** 极简 protobuf 解析(只解 Meta.field4/field6 与 MessageBody.ext[KeyValue]) */
 export function pbFields(buf) {
   const out = []
   let i = 0
@@ -666,7 +633,6 @@ export function decodeIMMessage(b64) {
   return { timestamp: Number(ts), ext }
 }
 
-/** parseIMSignActivityInfo */
 export function parseIMSignActivityInfo(att) {
   if (att?.attachmentType !== 15) return null
   const s = att.att_chat_course
@@ -697,7 +663,7 @@ export async function fetchGroupSignActivities(im, group) {
       if (!att) continue
       const info = parseIMSignActivityInfo(JSON.parse(att.stringValue))
       if (info && !out.has(info.activeId)) out.set(info.activeId, { ...info, groupId: group.groupId, groupName: group.name, messageTimestamp: d.timestamp })
-    } catch { /* 跳过无法解析的消息 */ }
+    } catch {}
   }
   return [...out.values()]
 }
@@ -717,7 +683,6 @@ export function sortIMActivities(list) {
   })
 }
 
-// ─── utilities/ChaoxingAnalyser.kt(公开排行榜,Supabase 可发布 key 已在仓库中) ─── //
 
 export const SUPABASE_ENDPOINT = "https://zpkavhhjdtghljleztpb.supabase.co/rest/v1"
 export const SUPABASE_API_KEY = "sb_publishable_dFuI4bOoYPlDozMXOGKgPg_cCQ0o22B"
@@ -743,7 +708,6 @@ export async function rankTop(n) {
   checkResponse(res)
   return res.json()
 }
-/** checkAndUploadAnalyserRankData 的 schoolName 规则 */
 export function pickRankSchoolName(fidList, selected, hide) {
   const raw = [...new Set((fidList ?? []).map((f) => f.name))]
   let s
@@ -760,7 +724,6 @@ export async function rankUpload(form) {
   return { status: res.status }
 }
 
-// ─── components/BlockedContent.kt / SponsorAlertDialog.kt ───────────── //
 
 export const URL_BANLIST = "http://cdn.aquamarine5.fun/chaoxingsignfaker_banlist.json"
 export const URL_SPONSOR = "http://cdn.aquamarine5.fun/chaoxingsignfaker_sponsor.json"

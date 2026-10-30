@@ -1,6 +1,3 @@
-/**
- * 退出码、全局参数与错误码映射。与 ysu CLI 保持一致,方便 agent 用同一套逻辑处理。
- */
 
 export const EXIT_CODES = Object.freeze({
   OK: 0,
@@ -18,7 +15,7 @@ export const EXIT_CODES = Object.freeze({
 
 export const EXIT_CODE_DOCS = {
   0: "成功",
-  1: "未知错误",
+  1: "未知错误 / 状态保存失败",
   2: "用法错误(未知命令 / 缺参数 / 参数类型不对)",
   3: "需要登录或会话已过期且无法自动重登(AUTH_REQUIRED / AUTH_SESSION_EXPIRED / AUTH_INVALID_CREDENTIAL)",
   4: "需要人工步骤:滑块验证码未能自动通过(CAPTCHA_REQUIRED),error.details.next 给出下一条命令",
@@ -30,7 +27,6 @@ export const EXIT_CODE_DOCS = {
   10: "dry-run:有副作用的命令未加 --confirm,只返回将要执行的操作",
 }
 
-/** 错误码 → 退出码 */
 export const CODE_EXIT = {
   USAGE: 2,
   AUTH_REQUIRED: 3,
@@ -54,6 +50,7 @@ export const CODE_EXIT = {
   DATA_NOT_FOUND: 8,
   RATE_LIMITED: 9,
   DRY_RUN: 10,
+  STATE_WRITE_FAILED: 1,
   UNKNOWN: 1,
 }
 

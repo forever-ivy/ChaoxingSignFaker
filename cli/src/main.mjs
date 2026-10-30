@@ -1,7 +1,3 @@
-/**
- * cxsign —— 随地大小签(ChaoxingSignFaker)的 agent 友好命令行。
- * 协议逻辑移植自 app/src/main/java/org/aquamarine5/brainspark/chaoxingsignfaker/。
- */
 import fs from "node:fs"
 import { COMMANDS } from "./commands.mjs"
 import { EXIT_CODE_DOCS, EXIT_CODES, GLOBAL_FLAGS } from "./spec.mjs"
@@ -159,6 +155,9 @@ export async function run(argv, env = process.env) {
     const out = json ? JSON.stringify(obj, null, pretty ? 2 : undefined) + "\n" : (human.endsWith("\n") ? human : human + "\n")
     return { exitCode, stdout: toErr && !json ? "" : out, stderr: toErr && !json ? out : "" }
   }
+  const isTruthy = (v) => v === true || /^(1|true|yes|on)$/i.test(String(v ?? ""))
+  pretty = isTruthy(flags.pretty)
+  json = isTruthy(flags.json ?? env.CXSIGN_JSON) || pretty
   try {
     g = resolveArgs(GLOBAL_FLAGS, flags, env)
     pretty = !!g.pretty; json = !!g.json || pretty
@@ -199,8 +198,7 @@ export async function run(argv, env = process.env) {
     }
 
     if (cmd.auth) {
-      // 懒加载:真正需要时再检查会话(命令内部会抛 AUTH_REQUIRED)
-      try { await import("./client.mjs").then((m) => m.selfClient()) } catch (e) { throw e }
+      await import("./client.mjs").then((m) => m.resolveClient(g.as))
     }
 
     let data = await cmd.run(ctx)
@@ -209,17 +207,18 @@ export async function run(argv, env = process.env) {
       const r = paginate(data, g.offset, g.limit)
       data = r.items; meta.page = r.page
     } else if (data && typeof data === "object" && Array.isArray(data.lessons) && (g.limit !== undefined || g.offset)) {
-      // schedule list 特殊处理
       const r = paginate(data.lessons, g.offset, g.limit)
       data = { ...data, lessons: r.items }; meta.page = r.page
     }
     data = scrub(data)
+    const flushError = (() => { try { flush(); return null } catch (e) { return e } })()
+    if (flushError) throw new CxError("STATE_WRITE_FAILED", "命令已执行但状态保存失败,本次修改不会保留", { reason: flushError.code ?? String(flushError.message ?? flushError), stateNotSaved: true })
     return emit({ ok: true, command: cmd.name, data, meta }, JSON.stringify(data, null, 2), 0)
   } catch (e) {
     const err = toErrorPayload(e)
+    const isFlushed = (() => { try { flush(); return true } catch { return false } })()
+    if (!isFlushed) err.details = { ...(err.details ?? {}), stateNotSaved: true }
     return emit({ ok: false, command: commandName, error: err }, `错误 [${err.code}] ${err.message}${err.details ? "\n" + JSON.stringify(err.details, null, 2) : ""}`, err.exitCode, true)
-  } finally {
-    try { flush() } catch { /* ignore */ }
   }
 }
 
