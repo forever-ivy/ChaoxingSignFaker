@@ -114,23 +114,51 @@ async function activityTarget(c, activeId, signer = null, classId = null) {
   return { raw, target }
 }
 
-async function resolveSignPosition(ctx, c, signer = null) {
+const JITTER_RADIUS_FRACTION = 0.3
+
+// 选点:命令行坐标 > 收藏 > 活动设置的目标(中心点+半径内小抖动) > 班级保存/记住的位置 > 历史学到的位置
+export async function resolveSignPosition(ctx, c, signer = null, deps = {}) {
   const a = ctx.args
+  const getTarget = deps.activityTarget ?? activityTarget
+  const st = deps.state ?? load()
   const explicit = locFromArgs(a)
-  if (explicit && !a.auto) return { pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` }
-  if (a.favorite && !a.auto) return { pos: findLocation(load(), a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` }
-  if (a["no-auto"] !== true) {
-    const { target } = await activityTarget(c, a.active, signer, a.class)
-    if (target) return { pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? ""), source: target.source === "learned" ? "learned" : "activity", reason: target.reason, target }
-    if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
+  const useTarget = a["no-auto"] !== true
+  const fetched = useTarget ? await getTarget(c, a.active, signer, a.class) : { raw: null, target: null }
+  const target = fetched.target
+  const required = fetched.raw?.ifopenAddress === 1
+  const finish = (r) => ({ ...r, target, required, check: rangeCheck(target, r.pos) })
+  if (explicit && !a.auto) return finish({ pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` })
+  if (a.favorite && !a.auto) return finish({ pos: findLocation(st, a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` })
+  if (target) {
+    const jit = target.radius ? target.radius * JITTER_RADIUS_FRACTION : null
+    return finish({ pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? "", { maxJitterMeters: jit }), source: target.source === "learned" ? "learned" : "activity", reason: target.reason })
   }
-  const rem = load().classSelectedLocation[String(a.class)] ?? load().classRememberedLocation[String(a.class)]
-  if (rem) return { pos: new api.SignLocation(rem.latitude, rem.longitude, rem.address), source: "remembered", reason: "活动未限定位置,使用该班级记住的位置" }
+  if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
+  const cid = String(a.class)
+  const sel = st.classSelectedLocation?.[cid], rem = st.classRememberedLocation?.[cid]
+  const note = required ? "(活动要求位置但没取到中心点,请核对)" : ""
+  if (sel) return finish({ pos: new api.SignLocation(sel.latitude, sel.longitude, a.address ?? sel.address), source: "class-selected", reason: `活动未给出目标点,使用该班级保存的位置${note}` })
+  if (rem) return finish({ pos: new api.SignLocation(rem.latitude, rem.longitude, a.address ?? rem.address), source: "remembered", reason: `活动未给出目标点,使用该班级上次签到记住的位置${note}` })
+  const hit = pickLearnedTarget(st.learnedLocations, { classId: a.class })
+  if (hit) return finish({ pos: new api.SignLocation(hit.cluster.latitude, hit.cluster.longitude, a.address ?? hit.cluster.address ?? ""), source: "learned", reason: `活动未给出目标点,使用该班级历史签到学到的位置(${hit.cluster.count} 次)${note}` })
   throw usage("位置签到需要 --lat/--lon、--location、--favorite,或活动本身设置了位置(--auto)")
 }
 
+export function rangeCheck(target, pos) {
+  if (!target || !pos) return null
+  const center = { lat: target.latitude, lon: target.longitude }
+  const d = (lat, lon) => Math.round(geo.distanceMeters(center, { lat, lon }) * 10) / 10
+  const dist = d(pos.randomizedLatitude, pos.randomizedLongitude)
+  const radius = target.radius ?? null
+  return { distanceMeters: dist, centerDistanceMeters: d(pos.latitude, pos.longitude), radius, insideRadius: radius ? dist <= radius : null, approximate: !!target.isApproximate }
+}
+
 function describePos(r) {
-  return { latitude: r.pos.latitude, longitude: r.pos.longitude, address: r.pos.address, coordSystem: geo.SIGN_COORD_SYSTEM, source: r.source, reason: r.reason, radius: r.target?.radius ?? null, method: r.target?.method ?? null, randomJitterDeg: r.pos.range }
+  return { latitude: r.pos.latitude, longitude: r.pos.longitude, signLatitude: Number(r.pos.randomizedLatitude.toFixed(6)), signLongitude: Number(r.pos.randomizedLongitude.toFixed(6)),
+    address: r.pos.address, coordSystem: geo.SIGN_COORD_SYSTEM, source: r.source, reason: r.reason, radius: r.target?.radius ?? null, method: r.target?.method ?? null,
+    randomJitterDeg: r.pos.range, required: r.required ?? null,
+    target: r.target ? { latitude: r.target.latitude, longitude: r.target.longitude, radius: r.target.radius ?? null, address: r.target.address ?? "", source: r.target.source } : null,
+    check: r.check ?? null }
 }
 
 function geoCfg() { const p = load().preferences ?? {}; return { baiduAk: p.baiduAk || "", nominatimUrl: p.nominatimUrl || "" } }
@@ -420,6 +448,7 @@ export const COMMANDS = [
       s("coord", "--lat/--lon 的坐标系 bd09|gcj02|wgs84(默认 bd09,签到接口用 bd09)"), b("auto", "强制使用活动设置的位置(范围取中点/质心)"), b("no-auto", "不读取活动设置的位置"),
       s("favorite", "使用收藏位置的 label"), s("face-object", "人脸照片 objectId"), s("face-file", "上传本地人脸照片"), n("face-index", "使用已保存的第 N 张人脸"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "手动提供缺口像素位置"), s("validate", "已有的 validate 字符串"),
+      b("skip-range-check", "坐标超出教师设置的半径时仍然提交"),
     ],
     plan: async (ctx) => {
       const base = { active: ctx.args.active, class: ctx.args.class, course: ctx.args.course, face: ctx.args["face-object"] ?? ctx.args["face-file"] ?? ctx.args["face-index"] }
@@ -435,6 +464,8 @@ export const COMMANDS = [
         const statusP = quiet(signer.checkSignStatus())
         const resolved = await resolvedP
         const pos = resolved.pos
+        if (resolved.check?.insideRadius === false && !resolved.check.approximate && !ctx.args["skip-range-check"])
+          throw new CxError("SIGN_WRONG_POSITION", `选定坐标距目标点 ${resolved.check.distanceMeters} 米,超出半径 ${resolved.check.radius} 米,未提交`, { position: describePos(resolved), next: "去掉 --lat/--lon/--favorite 用 --auto,或加 --skip-range-check" })
         const face = await faceP
         await statusP
         await doSign(signer, (v) => signer.signLocation(pos, { validate: v, faceObjectId: face }), ctx.args)

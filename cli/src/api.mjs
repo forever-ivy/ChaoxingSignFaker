@@ -237,15 +237,23 @@ export function describeSignInfo(d) {
 }
 
 export class SignLocation {
-  constructor(latitude, longitude, address) {
+  // maxJitterMeters:教师设置了半径时,随机偏移最多取半径的 30%,保证抖动后仍在范围内
+  constructor(latitude, longitude, address, { maxJitterMeters = null } = {}) {
     this.latitude = Number(latitude); this.longitude = Number(longitude); this.address = address ?? ""
     this.tightened = false
+    this.maxJitterMeters = Number.isFinite(Number(maxJitterMeters)) && maxJitterMeters !== null ? Number(maxJitterMeters) : null
+    this.rejitter()
   }
-  get range() { return this.tightened ? 0.00001 : 0.00005 }
+  get range() {
+    const base = this.tightened ? 0.00001 : 0.00005
+    return this.maxJitterMeters === null ? base : Math.min(base, Math.max(0, this.maxJitterMeters) / 111320 / Math.SQRT2)
+  }
   rnd() { return (Math.random() * 2 - 1) * this.range }
-  get randomizedLatitude() { return this.latitude + this.rnd() }
-  get randomizedLongitude() { return this.longitude + this.rnd() }
-  disableRandomizedLocation() { this.tightened = true }
+  // 每次签到尝试固定一组抖动坐标,latitude 参数与 locationResult 里的坐标保持一致
+  rejitter() { this.jLat = this.latitude + this.rnd(); this.jLon = this.longitude + this.rnd() }
+  get randomizedLatitude() { return this.jLat }
+  get randomizedLongitude() { return this.jLon }
+  disableRandomizedLocation() { this.tightened = true; this.rejitter() }
 }
 
 const f6 = (n) => Number(n.toFixed(6))
