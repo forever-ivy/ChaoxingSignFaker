@@ -96,27 +96,56 @@ export function learnedTarget(st, raw, classId) {
     reason: `接口没返回中心坐标;使用历史签到学到的位置(${hit.match === "class" ? "同班级最常用点" : "同一签到地址"},${k.count} 次成功签到的中心,离散 ${k.spreadMeters} 米)` }
 }
 
-async function activityTarget(c, activeId, signer = null, classId = null) {
+// 只解析活动自带的精确目标(中心点/多边形);学到的位置与地址地理编码由 resolveSignPosition 按优先级决定
+async function activityTarget(c, activeId, signer = null) {
   const raw = signer ? await signer.getSignInfo() : await api.getSignInfo(c, activeId)
-  let target = geo.resolveSignTarget(raw)
-  if (!target && raw.ifopenAddress === 1) target = learnedTarget(load(), raw, classId)
-  if (!target && raw.ifopenAddress === 1 && raw.locationText) {
-    try {
-      const hit = await phase("geocode", () => cachedGeocode(raw.locationText, geoCfg()))
-      const r = { provider: hit?.provider }
-      if (hit) {
-        const radius = raw.locationRange === null || raw.locationRange === undefined || raw.locationRange === "" ? null : Number(raw.locationRange)
-        target = { latitude: hit.latitude, longitude: hit.longitude, radius, address: raw.locationText, coordSystem: geo.SIGN_COORD_SYSTEM, source: "locationText", method: "geocoded-address",
-          provider: r.provider, geocodeQuery: hit.query, isApproximate: true, reason: `接口没返回中心坐标,只给了地址和半径 ${radius ?? "?"} 米;用 ${r.provider} 把地址解析为坐标(近似,建议核对)` }
-      }
-    } catch {}
+  return { raw, target: geo.resolveSignTarget(raw) }
+}
+
+const rangeOf = (raw) => raw?.locationRange === null || raw?.locationRange === undefined || raw?.locationRange === "" ? null : Number(raw.locationRange)
+
+async function geocodedTarget(raw) {
+  if (!raw?.locationText) return null
+  try {
+    const hit = await phase("geocode", () => cachedGeocode(raw.locationText, geoCfg()))
+    if (!hit) return null
+    const radius = rangeOf(raw)
+    return { latitude: hit.latitude, longitude: hit.longitude, radius, address: raw.locationText, coordSystem: geo.SIGN_COORD_SYSTEM, source: "locationText", method: "geocoded-address",
+      provider: hit.provider, geocodeQuery: hit.query, isApproximate: true, reason: `接口没返回中心坐标,只给了地址和半径 ${radius ?? "?"} 米;用 ${hit.provider} 把地址解析为坐标(近似,最后手段,建议核对)` }
+  } catch { return null }
+}
+
+export const COURSE_HISTORY_TTL_MS = 3 * 24 * 60 * 60 * 1000
+
+// 本课程历史签到位置:缓存过期/缺失时按需只读拉取本班级 getAttendInfo 并写入本地缓存
+async function courseHistory(ctx, c, st, deps, now = Date.now()) {
+  const cid = String(ctx.args.class)
+  const cached = st.learnedLocations?.[cid]
+  if (cached?.clusters?.length && now - (cached.at ?? 0) < COURSE_HISTORY_TTL_MS) return { entry: cached, refreshed: false }
+  if (ctx.args["no-learn"]) return { entry: cached ?? null, refreshed: false }
+  try {
+    const scan = deps.learnScan ?? learnScan
+    const r = await phase("learn", () => scan({ args: { class: ctx.args.class, course: ctx.args.course, days: 365 } }, c))
+    const p = r.proposals.find((x) => String(x.classId) === cid)
+    if (p?.clusters?.length) { (deps.saveLearned ?? saveLearned)(st, [p], now); return { entry: st.learnedLocations[cid], refreshed: true } }
+  } catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e }
+  return { entry: cached ?? null, refreshed: false }
+}
+
+export function pickCourseCluster(entry, { locationText, approx } = {}) {
+  const cl = entry?.clusters ?? []
+  if (!cl.length) return null
+  if (locationText) { const h = cl.find((k) => k.locationTexts?.includes(locationText)); if (h) return { cluster: h, match: "address" } }
+  if (approx?.radius) {
+    const near = cl.filter((k) => geo.distanceMeters({ lat: approx.latitude, lon: approx.longitude }, { lat: k.latitude, lon: k.longitude }) <= Math.max(approx.radius, 500))
+    if (near.length) return { cluster: near[0], match: "near-address" }
   }
-  return { raw, target }
+  return { cluster: cl[0], match: "most-frequent" }
 }
 
 const JITTER_RADIUS_FRACTION = 0.3
 
-// 选点:命令行坐标 > 收藏 > 活动设置的目标(中心点+半径内小抖动) > 班级保存/记住的位置 > 历史学到的位置
+// 选点:命令行坐标 > 收藏 > 活动精确目标 > 本课程历史签到点 > 班级保存 > 上次记住 > 地址地理编码(近似)
 export async function resolveSignPosition(ctx, c, signer = null, deps = {}) {
   const a = ctx.args
   const getTarget = deps.activityTarget ?? activityTarget
@@ -124,23 +153,41 @@ export async function resolveSignPosition(ctx, c, signer = null, deps = {}) {
   const explicit = locFromArgs(a)
   const useTarget = a["no-auto"] !== true
   const fetched = useTarget ? await getTarget(c, a.active, signer, a.class) : { raw: null, target: null }
-  const target = fetched.target
-  const required = fetched.raw?.ifopenAddress === 1
-  const finish = (r) => ({ ...r, target, required, check: rangeCheck(target, r.pos) })
+  const raw = fetched.raw
+  let target = fetched.target
+  const required = raw?.ifopenAddress === 1
+  let approx = null
+  let approxDone = false
+  const getApprox = async () => { if (!approxDone) { approx = await (deps.geocode ?? geocodedTarget)(raw); approxDone = true } return approx }
+  const finish = async (r) => {
+    const t = target ?? (required && raw?.locationText ? await getApprox() : null)
+    return { ...r, target: t, required, check: rangeCheck(t, r.pos), geocoded: approx && r.source !== "geocoded" ? { latitude: approx.latitude, longitude: approx.longitude, distanceMeters: Math.round(geo.distanceMeters({ lat: approx.latitude, lon: approx.longitude }, { lat: r.pos.latitude, lon: r.pos.longitude })) } : null }
+  }
   if (explicit && !a.auto) return finish({ pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` })
   if (a.favorite && !a.auto) return finish({ pos: findLocation(st, a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` })
-  if (target) {
-    const jit = target.radius ? target.radius * JITTER_RADIUS_FRACTION : null
-    return finish({ pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? "", { maxJitterMeters: jit }), source: target.source === "learned" ? "learned" : "activity", reason: target.reason })
-  }
-  if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
+  const radius = target?.radius ?? rangeOf(raw)
+  const jit = radius ? radius * JITTER_RADIUS_FRACTION : null
+  if (target) return finish({ pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? "", { maxJitterMeters: jit }), source: "activity", reason: target.reason })
   const cid = String(a.class)
+  if (useTarget) {
+    const { entry, refreshed } = await courseHistory(ctx, c, st, deps)
+    if (entry?.clusters?.length) {
+      const g = required && raw?.locationText ? await getApprox() : null
+      const hit = pickCourseCluster(entry, { locationText: raw?.locationText || undefined, approx: g })
+      const k = hit.cluster
+      return finish({ pos: new api.SignLocation(k.latitude, k.longitude, a.address ?? (raw?.locationText || k.address || ""), { maxJitterMeters: jit ?? 15 }), source: "course-history",
+        samples: k.count, totalSamples: entry.clusters.reduce((s2, x) => s2 + (x.count ?? 0), 0), historyMatch: hit.match, historyRefreshed: refreshed, historyAt: entry.at ?? null,
+        reason: `本课程历史成功签到点(${k.count} 次,离散 ${k.spreadMeters ?? "?"} 米,匹配方式 ${hit.match})${required ? ";活动只给了地址+半径,历史点比地址解析更可靠" : ""}` })
+    }
+  }
   const sel = st.classSelectedLocation?.[cid], rem = st.classRememberedLocation?.[cid]
-  const note = required ? "(活动要求位置但没取到中心点,请核对)" : ""
-  if (sel) return finish({ pos: new api.SignLocation(sel.latitude, sel.longitude, a.address ?? sel.address), source: "class-selected", reason: `活动未给出目标点,使用该班级保存的位置${note}` })
-  if (rem) return finish({ pos: new api.SignLocation(rem.latitude, rem.longitude, a.address ?? rem.address), source: "remembered", reason: `活动未给出目标点,使用该班级上次签到记住的位置${note}` })
-  const hit = pickLearnedTarget(st.learnedLocations, { classId: a.class })
-  if (hit) return finish({ pos: new api.SignLocation(hit.cluster.latitude, hit.cluster.longitude, a.address ?? hit.cluster.address ?? ""), source: "learned", reason: `活动未给出目标点,使用该班级历史签到学到的位置(${hit.cluster.count} 次)${note}` })
+  if (sel) return finish({ pos: new api.SignLocation(sel.latitude, sel.longitude, a.address ?? sel.address), source: "class-selected", reason: "使用该班级保存的位置" })
+  if (rem) return finish({ pos: new api.SignLocation(rem.latitude, rem.longitude, a.address ?? rem.address), source: "remembered", reason: "使用该班级上次签到记住的位置" })
+  if (required) {
+    const g = await getApprox()
+    if (g) { target = g; return finish({ pos: new api.SignLocation(g.latitude, g.longitude, a.address ?? g.address ?? "", { maxJitterMeters: jit }), source: "geocoded", reason: g.reason }) }
+  }
+  if (a.auto) throw notFound("该活动没有设置签到位置/范围,本课程也没有历史签到位置,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
   throw usage("位置签到需要 --lat/--lon、--location、--favorite,或活动本身设置了位置(--auto)")
 }
 
@@ -150,13 +197,13 @@ export function rangeCheck(target, pos) {
   const d = (lat, lon) => Math.round(geo.distanceMeters(center, { lat, lon }) * 10) / 10
   const dist = d(pos.randomizedLatitude, pos.randomizedLongitude)
   const radius = target.radius ?? null
-  return { distanceMeters: dist, centerDistanceMeters: d(pos.latitude, pos.longitude), radius, insideRadius: radius ? dist <= radius : null, approximate: !!target.isApproximate }
+  return { distanceMeters: dist, centerDistanceMeters: d(pos.latitude, pos.longitude), radius, insideRadius: radius && !target.isApproximate ? dist <= radius : null, approximate: !!target.isApproximate }
 }
 
 function describePos(r) {
   return { latitude: r.pos.latitude, longitude: r.pos.longitude, signLatitude: Number(r.pos.randomizedLatitude.toFixed(6)), signLongitude: Number(r.pos.randomizedLongitude.toFixed(6)),
     address: r.pos.address, coordSystem: geo.SIGN_COORD_SYSTEM, source: r.source, reason: r.reason, radius: r.target?.radius ?? null, method: r.target?.method ?? null,
-    randomJitterDeg: r.pos.range, required: r.required ?? null,
+    randomJitterDeg: r.pos.range, required: r.required ?? null, samples: r.samples ?? null, totalSamples: r.totalSamples ?? null, historyMatch: r.historyMatch ?? null, historyRefreshed: r.historyRefreshed ?? null, geocoded: r.geocoded ?? null,
     target: r.target ? { latitude: r.target.latitude, longitude: r.target.longitude, radius: r.target.radius ?? null, address: r.target.address ?? "", source: r.target.source } : null,
     check: r.check ?? null }
 }
@@ -415,7 +462,8 @@ export const COMMANDS = [
     args: [n("active", "活动 ID", { required: true })],
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
-        const { raw, target } = await activityTarget(c, ctx.args.active)
+        const { raw, target: exact } = await activityTarget(c, ctx.args.active)
+        const target = exact ?? (raw.ifopenAddress === 1 ? await geocodedTarget(raw) : null)
         const info = api.describeSignInfo(raw)
         return {
           activeId: Number(ctx.args.active), signType: info.signType, isPositionRequired: info.requirements.position,
@@ -448,7 +496,7 @@ export const COMMANDS = [
       s("coord", "--lat/--lon 的坐标系 bd09|gcj02|wgs84(默认 bd09,签到接口用 bd09)"), b("auto", "强制使用活动设置的位置(范围取中点/质心)"), b("no-auto", "不读取活动设置的位置"),
       s("favorite", "使用收藏位置的 label"), s("face-object", "人脸照片 objectId"), s("face-file", "上传本地人脸照片"), n("face-index", "使用已保存的第 N 张人脸"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "手动提供缺口像素位置"), s("validate", "已有的 validate 字符串"),
-      b("skip-range-check", "坐标超出教师设置的半径时仍然提交"),
+      b("skip-range-check", "坐标超出教师设置的半径时仍然提交"), b("no-learn", "不自动拉取本课程历史签到位置"),
     ],
     plan: async (ctx) => {
       const base = { active: ctx.args.active, class: ctx.args.class, course: ctx.args.course, face: ctx.args["face-object"] ?? ctx.args["face-file"] ?? ctx.args["face-index"] }
