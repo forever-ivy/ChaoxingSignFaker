@@ -113,3 +113,15 @@ test("rangeCheck 无半径时 insideRadius 为 null", () => {
   const c = rangeCheck({ latitude: 1, longitude: 1, radius: null }, new api.SignLocation(1, 1, ""))
   assert.equal(c.insideRadius, null)
 })
+
+import { positionForRequired } from "../src/commands.mjs"
+test("签到码/手势/二维码:活动要求位置时沿用本课程历史点,不要求时不带坐标", async () => {
+  const st = { classSelectedLocation: {}, classRememberedLocation: {}, learnedLocations: HIST, locations: [] }
+  const d = { state: st, learnScan: async () => ({ proposals: [] }), geocode: async () => null }
+  const r = await positionForRequired(ctxOf({}), null, { ifopenAddress: 1, locationText: "", locationRange: "" }, {}, d)
+  assert.equal(r.source, "course-history"); assert.equal(r.pos.latitude, 5)
+  assert.equal(await positionForRequired(ctxOf({}), null, { ifopenAddress: 0 }, {}, d), null)
+  const e = await positionForRequired(ctxOf({}), null, { ifopenAddress: 1 }, {}, { ...d, state: { ...st, learnedLocations: {} } })
+  assert.equal(e.pos, null); assert.ok(e.error)
+  assert.equal((await positionForRequired(ctxOf({ lat: 1, lon: 2 }), null, { ifopenAddress: 1 }, {}, d)).source, "args")
+})

@@ -208,6 +208,56 @@ function describePos(r) {
     check: r.check ?? null }
 }
 
+// 签到码/手势/二维码:活动要求位置(ifopenAddress=1)且没给坐标时,沿用位置签到的选点逻辑(精确目标 > 本课程历史 > 班级保存 > 记住 > 地址解析)
+export async function positionForRequired(ctx, c, info, { activeId, classId, courseId } = {}, deps = {}) {
+  const explicit = locFromArgs(ctx.args)
+  if (explicit) return { pos: explicit, source: "args", reason: "使用命令行给出的坐标" }
+  if (ctx.args.favorite) return { pos: findLocation(deps.state ?? load(), ctx.args.favorite), source: "favorite", reason: `使用收藏位置 ${ctx.args.favorite}` }
+  if (info?.ifopenAddress !== 1) return null
+  const sub = { args: { ...ctx.args, active: activeId ?? ctx.args.active, class: classId ?? ctx.args.class, course: courseId ?? ctx.args.course, auto: false } }
+  try { return await resolveSignPosition(sub, c, null, { activityTarget: async () => ({ raw: info, target: geo.resolveSignTarget(info) }), ...deps }) }
+  catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e; return { pos: null, error: { code: e.code ?? "UNKNOWN", message: e.message } } }
+}
+
+// 只读的签到前检查,供各签到命令的 dry-run 计划使用;检查失败不影响 dry-run 本身
+const safePlan = async (ctx, fn, base = {}) => { try { return await withRelogin(ctx, fn) } catch (e) { return { ...base, planError: { code: e.code ?? "UNKNOWN", message: e.message }, warnings: [] } } }
+
+async function signPlan(ctx, c, opts) {
+  try { return await signPlanInner(ctx, c, opts) }
+  catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e; return { activeId: Number(opts.activeId), expected: opts.kind, planError: { code: e.code ?? "UNKNOWN", message: e.message }, warnings: [] } }
+}
+
+async function signPlanInner(ctx, c, { activeId, classId, courseId, kind }) {
+  const info = await api.getSignInfo(c, activeId)
+  const d = api.describeSignInfo(info)
+  const out = { activeId: Number(activeId), classId: classId ?? d.classId, courseId: courseId ?? null, signType: d.signType, expected: kind, typeMatches: d.signType === kind || (kind === "photo" && d.signType === "photo"),
+    requirements: d.requirements, isLate: d.isLate, numberCount: d.numberCount, warnings: [] }
+  if (!out.typeMatches) out.warnings.push(`活动类型是 ${d.signType},不是 ${kind}`)
+  if (d.isLate) out.warnings.push("活动已结束(迟到/签到已结束)")
+  if (d.requirements.face && !(ctx.args["face-object"] || ctx.args["face-file"] || ctx.args["face-index"] !== undefined)) out.warnings.push(kind === "qrcode" ? "活动开启了人脸识别,建议提供 --face-*" : "活动开启了人脸识别;签到码/手势/拍照签到不带人脸参数,服务器可能返回 checkFace")
+  if (d.requirements.captcha) out.warnings.push("活动需要滑块验证码,真签到时请加 --captcha-auto 或 --captcha-x")
+  if (kind === "password" || kind === "gesture") {
+    if (ctx.args.code) {
+      if (d.numberCount && String(ctx.args.code).length !== Number(d.numberCount)) out.warnings.push(`${kind === "gesture" ? "手势" : "签到码"}长度 ${String(ctx.args.code).length} 与活动要求 ${d.numberCount} 位不符`)
+      try { out.codeValid = await api.checkSignCode(c, activeId, ctx.args.code) } catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e; out.codeValid = null }
+      if (out.codeValid === false) out.warnings.push("服务器校验:签到码/手势不正确")
+    }
+  }
+  if (kind === "photo") {
+    const img = ctx.args.image
+    out.photo = { required: d.requirements.photo, image: img ? { path: img, exists: fs.existsSync(img), bytes: fs.existsSync(img) ? fs.statSync(img).size : null } : null, objectId: ctx.args["object-id"] ?? null, willUpload: !!img && !ctx.args["object-id"] }
+    if (d.requirements.photo && !img && !ctx.args["object-id"]) out.warnings.push("该活动需要拍照,请用 --image <路径> 或 --object-id")
+    if (img && !out.photo.image.exists) out.warnings.push(`照片文件不存在: ${img}`)
+    if (!d.requirements.photo) out.mode = "click"; else out.mode = "photo"
+  }
+  if (kind !== "photo") {
+    const r = await positionForRequired(ctx, c, info, { activeId, classId: out.classId, courseId })
+    out.position = r?.pos ? describePos(r) : r?.error ? { error: r.error } : null
+    if (d.requirements.position && !r?.pos) out.warnings.push("活动要求位置,但没有可用坐标(给 --lat/--lon/--favorite,或先 locations learn)")
+  }
+  return out
+}
+
 function geoCfg() { const p = load().preferences ?? {}; return { baiduAk: p.baiduAk || "", nominatimUrl: p.nominatimUrl || "" } }
 
 async function locationFromAddArgs(ctx) {
@@ -527,18 +577,19 @@ export const COMMANDS = [
     name: "sign password", summary: "签到码签到", auth: true, sideEffect: true,
     args: [
       n("active", "活动 ID", { required: true }), n("class", "班级 ID", { required: true }), n("course", "课程 ID", { required: true }),
-      s("code", "签到码", { required: true }), s("ext", "ext JSON"), n("lat", "纬度"), n("lon", "经度"), s("address", "地址"), s("location", "lat,lon[,address]"),
+      s("code", "签到码", { required: true }), s("ext", "ext JSON"), n("lat", "纬度"), n("lon", "经度"), s("address", "地址"), s("location", "lat,lon[,address]"), s("favorite", "收藏位置 label"), b("no-learn", "不自动拉取本课程历史位置"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "缺口像素"), s("validate", "validate 字符串"), b("skip-check", "跳过 checkSignCode"),
     ],
-    plan: (ctx) => ({ active: ctx.args.active, code: "***" }),
+    plan: (ctx) => safePlan(ctx, async (c) => ({ code: "***", ...(await signPlan(ctx, c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, kind: "password" })) }), { code: "***" }),
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
         if (ctx.args["captcha-auto"]) warmCaptchaModel()
         const codeP = ctx.args["skip-check"] ? null : quiet(phase("checkSignCode", () => api.checkSignCode(c, ctx.args.active, ctx.args.code)))
+        const infoP = quiet(signer.getSignInfo())
         await signer.checkSignStatus()
         if (codeP && !(await codeP)) throw new CxError("SIGN_CODE_INCORRECT", "签到码错误")
-        const pos = locFromArgs(ctx.args)
+        const pos = (await positionForRequired(ctx, c, await infoP))?.pos ?? null
         await doSign(signer, (v) => signer.signCode(ctx.args.code, pos, { validate: v }), ctx.args)
         bumpAnalysis("passwordSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
         return { signed: true, type: "password", activeId: Number(ctx.args.active) }
@@ -549,18 +600,19 @@ export const COMMANDS = [
     name: "sign gesture", summary: "手势签到(手势序列等同签到码)", auth: true, sideEffect: true,
     args: [
       n("active", "活动 ID", { required: true }), n("class", "班级 ID", { required: true }), n("course", "课程 ID", { required: true }),
-      s("code", "手势序列(如 14789)", { required: true }), s("ext", "ext JSON"), n("lat", "纬度"), n("lon", "经度"), s("address", "地址"), s("location", "lat,lon[,address]"),
+      s("code", "手势序列(如 14789)", { required: true }), s("ext", "ext JSON"), n("lat", "纬度"), n("lon", "经度"), s("address", "地址"), s("location", "lat,lon[,address]"), s("favorite", "收藏位置 label"), b("no-learn", "不自动拉取本课程历史位置"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "缺口像素"), s("validate", "validate 字符串"), b("skip-check", "跳过校验"),
     ],
-    plan: (ctx) => ({ active: ctx.args.active, code: "***" }),
+    plan: (ctx) => safePlan(ctx, async (c) => ({ code: "***", ...(await signPlan(ctx, c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, kind: "gesture" })) }), { code: "***" }),
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
         if (ctx.args["captcha-auto"]) warmCaptchaModel()
         const codeP = ctx.args["skip-check"] ? null : quiet(phase("checkSignCode", () => api.checkSignCode(c, ctx.args.active, ctx.args.code)))
+        const infoP = quiet(signer.getSignInfo())
         await signer.checkSignStatus()
         if (codeP && !(await codeP)) throw new CxError("SIGN_CODE_INCORRECT", "手势不正确")
-        const pos = locFromArgs(ctx.args)
+        const pos = (await positionForRequired(ctx, c, await infoP))?.pos ?? null
         await doSign(signer, (v) => signer.signCode(ctx.args.code, pos, { validate: v }), ctx.args)
         bumpAnalysis("gestureSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
         return { signed: true, type: "gesture", activeId: Number(ctx.args.active) }
@@ -574,7 +626,7 @@ export const COMMANDS = [
       s("ext", "ext JSON"), s("image", "本地照片路径(需要拍照时必填)"), s("object-id", "已上传的云盘 objectId"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "缺口像素"), s("validate", "validate 字符串"),
     ],
-    plan: (ctx) => ({ active: ctx.args.active, image: ctx.args.image ?? ctx.args["object-id"] ?? null }),
+    plan: (ctx) => safePlan(ctx, (c) => signPlan(ctx, c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, kind: "photo" })),
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
@@ -603,9 +655,19 @@ export const COMMANDS = [
       n("lat", "纬度"), n("lon", "经度"), s("address", "地址"), s("location", "lat,lon[,address]"), s("favorite", "收藏位置 label"),
       s("face-object", "人脸 objectId"), s("face-file", "本地人脸文件"), n("face-index", "已保存人脸下标"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "缺口像素"), s("validate", "validate 字符串"),
-      b("skip-expire-check", "跳过二维码过期检查"),
+      b("skip-expire-check", "跳过二维码过期检查"), b("no-learn", "不自动拉取本课程历史位置"),
     ],
-    plan: (ctx) => ({ qr: scrub(String(ctx.args.qr)).slice(0, 40) + "…" }),
+    plan: (ctx) => safePlan(ctx, async (c) => {
+      const parsed = api.parseQRCode(ctx.args.qr)
+      const base = { qr: scrub(String(ctx.args.qr)).slice(0, 40) + "…", qrParsed: { aid: parsed.aid, hasEnc: !!parsed.enc } }
+      if (parsed.aid === null) return { ...base, warnings: ["二维码中未包含签到活动 ID"] }
+      const p = await signPlan(ctx, c, { activeId: parsed.aid, classId: ctx.args.class, courseId: ctx.args.course, kind: "qrcode" })
+      if (p.planError) return { ...base, ...p }
+      if (!parsed.enc) p.warnings.push("二维码里没有 enc,无法签到")
+      if (!ctx.args["skip-expire-check"] && parsed.enc) { try { p.qrExpired = await api.isQRCodeExpired(c, parsed, parsed.aid) } catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e; p.qrExpired = null } }
+      if (p.qrExpired) p.warnings.push("二维码已过期" + (p.requirements.refreshingQRCode ? "(该活动二维码会定时刷新,需要扫最新的)" : ""))
+      return { ...base, ...p }
+    }, { qr: scrub(String(ctx.args.qr)).slice(0, 40) + "…" }),
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const parsed = api.parseQRCode(ctx.args.qr)
@@ -624,8 +686,7 @@ export const COMMANDS = [
         const faceP = quiet(phase("face", () => resolveFaceObjectId(c, ctx.args)))
         if (expP && (await expP) === true) throw new CxError("SIGN_QRCODE_EXPIRED", "二维码已过期")
         await statusP
-        let pos = locFromArgs(ctx.args)
-        if (!pos && ctx.args.favorite) pos = findLocation(load(), ctx.args.favorite)
+        const pos = (await positionForRequired(ctx, c, await signer.getSignInfo(), { activeId: parsed.aid, classId, courseId }))?.pos ?? null
         const face = await faceP
         await doSign(signer, (v) => signer.signQRCode(parsed, pos, { validate: v, faceObjectId: face }), ctx.args)
         bumpAnalysis("qrcodeSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
@@ -1303,6 +1364,9 @@ export const COMMANDS = [
 
 export const LEARN_SCAN_CONCURRENCY = 8
 
+// 位置签到之外,要求位置的签到码/手势/二维码签到也会留下本人签到坐标
+const LEARN_SIGN_TYPES = new Set(["location", "password", "gesture", "qrcode"])
+
 export async function learnScan(ctx, c, now = Date.now()) {
   const a = ctx.args
   const days = a.days ?? 180, radius = a["cluster-m"] ?? LEARN_CLUSTER_METERS, top = a.top ?? 3
@@ -1313,7 +1377,7 @@ export async function learnScan(ctx, c, now = Date.now()) {
   await mapLimit(courses, LEARN_SCAN_CONCURRENCY, async (course) => {
     try {
       const { activities } = await api.getActivities(c, course)
-      for (const x of activities) if (x.signType === "location" && (!days || !x.startTime || Number(x.startTime) >= now - days * 86400000)) acts.push({ ...x, courseName: course.courseName })
+      for (const x of activities) if (LEARN_SIGN_TYPES.has(x.signType) && (!days || !x.startTime || Number(x.startTime) >= now - days * 86400000)) acts.push({ ...x, courseName: course.courseName })
     } catch (e) { if (e.code === "AUTH_SESSION_EXPIRED") throw e }
   })
   const rows = []
