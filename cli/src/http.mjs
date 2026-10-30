@@ -12,10 +12,49 @@ export const CLIENT_INFOS = {
   },
 }
 
-export const options = { timeoutMs: 15000, retries: 2, verbose: false, userAgent: DEFAULT_USER_AGENT }
-export const stats = { requests: 0, retries: 0 }
+export const options = { timeoutMs: 15000, retries: 2, verbose: false, userAgent: DEFAULT_USER_AGENT, trace: false, hedgeMs: 2500 }
+export const stats = { requests: 0, retries: 0, hedged: 0, trace: [], phases: [] }
 
 export const transport = { fetch: (...a) => globalThis.fetch(...a) }
+
+const t0 = () => Math.round(performance.now())
+
+export async function phase(name, fn) {
+  if (!options.trace) return fn()
+  const start = t0()
+  try { return await fn() } finally { stats.phases.push({ name, startMs: start, ms: t0() - start }) }
+}
+
+export async function hedgedFetch(url, init, hedgeMs = options.hedgeMs) {
+  if (!(hedgeMs > 0)) return transport.fetch(url, init)
+  const outer = init.signal
+  const ctrls = []
+  const attempt = () => {
+    const c = new AbortController()
+    ctrls.push(c)
+    const signal = outer ? AbortSignal.any([outer, c.signal]) : c.signal
+    return transport.fetch(url, { ...init, signal }).then((resp) => ({ resp, c }))
+  }
+  return new Promise((resolve, reject) => {
+    let isDone = false, pending = 1, lastErr
+    const settle = ({ resp, c }) => {
+      if (isDone) { resp.body?.cancel?.().catch(() => {}); return }
+      isDone = true
+      clearTimeout(timer)
+      for (const x of ctrls) if (x !== c) x.abort()
+      resolve(resp)
+    }
+    const fail = (e) => { lastErr = e; if (--pending === 0 && !isDone) { isDone = true; clearTimeout(timer); reject(lastErr) } }
+    attempt().then(settle, fail)
+    const timer = setTimeout(() => {
+      if (isDone) return
+      pending++
+      stats.hedged++
+      attempt().then(settle, fail)
+    }, hedgeMs)
+    timer.unref?.()
+  })
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
@@ -88,7 +127,7 @@ function buildUrl(url, query) {
 export async function request(jar, req) {
   const method = (req.method ?? "GET").toUpperCase()
   let url = buildUrl(req.url, req.query)
-  const isIdempotent = method === "GET" && !req.noRetry
+  const isIdempotent = (method === "GET" || req.idempotent === true) && !req.noRetry
   const maxAttempts = isIdempotent ? Math.max(0, options.retries) + 1 : 1
   let lastErr
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -106,13 +145,13 @@ export async function request(jar, req) {
         const cookie = jar?.header(curUrl)
         if (cookie) headers.set("cookie", cookie)
         stats.requests++
-        const resp = await transport.fetch(curUrl, {
-          method: curMethod,
-          headers,
-          body: curMethod === "GET" ? undefined : body,
-          redirect: "manual",
-          signal: AbortSignal.timeout(options.timeoutMs),
-        })
+        const reqStart = t0()
+        const init = { method: curMethod, headers, body: curMethod === "GET" ? undefined : body, redirect: "manual", signal: AbortSignal.timeout(options.timeoutMs) }
+        const resp = isIdempotent && req.hedge ? await hedgedFetch(curUrl, init) : await transport.fetch(curUrl, init)
+        if (options.trace) {
+          const u = new URL(curUrl)
+          stats.trace.push({ method: curMethod, host: u.hostname, path: u.pathname, status: resp.status, startMs: reqStart, ms: t0() - reqStart, attempt })
+        }
         const setCookies = resp.headers.getSetCookie?.() ?? []
         jar?.save(curUrl, setCookies)
         if (options.verbose) process.stderr.write(`[http] ${curMethod} ${redactUrl(curUrl)} -> ${resp.status} ${Date.now() - started}ms\n`)

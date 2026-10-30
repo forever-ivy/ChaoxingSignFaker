@@ -67,6 +67,8 @@ export const GLOBAL_FLAGS = [
   { name: "dry-run", type: "boolean", description: "强制 dry-run(优先于 --confirm)" },
   { name: "no-relogin", type: "boolean", description: "会话过期时不使用已保存的(加密)密码自动重登" },
   { name: "as", type: "string", env: "CXSIGN_AS", description: "以哪个账号执行:self(默认,主账号)或代签用户的手机号" },
+  { name: "trace", type: "boolean", env: "CXSIGN_TRACE", description: "在 meta.trace 里输出耗时分解(启动、各阶段、每个 HTTP 请求的主机/路径/状态/耗时;不含参数与 cookie)" },
+  { name: "hedge-ms", type: "number", env: "CXSIGN_HEDGE_MS", default: 2500, description: "只读 GET 超过这么多毫秒没响应就并发补发一次,取先返回的(0 关闭;签到/POST 从不补发)" },
   { name: "verbose", type: "boolean", env: "CXSIGN_VERBOSE", description: "把 HTTP 摘要日志写到 stderr(敏感参数已打码,不含 cookie / 请求体)" },
   { name: "home", type: "string", env: "CXSIGN_HOME", description: "状态目录,默认 ~/.config/cxsign(目录 0700,state.json 0600)" },
   { name: "help", type: "boolean", description: "显示帮助" },

@@ -108,6 +108,16 @@ export function postprocess(data, n, padded) {
 }
 
 let sessionPromise = null
+
+export function warmCaptchaModel() {
+  const ort = optional("onnxruntime-node")
+  const p = modelPath()
+  if (!ort || !fs.existsSync(p)) return null
+  sessionPromise ??= ort.InferenceSession.create(fs.readFileSync(p))
+  sessionPromise.catch(() => { sessionPromise = null })
+  return sessionPromise
+}
+
 export async function predictSliderXOffset(buf) {
   const ort = optional("onnxruntime-node")
   if (!ort) throw new CxError("FEATURE_NOT_SUPPORTED", "未安装可选依赖 onnxruntime-node,无法自动识别滑块", { next: "cd cli && npm install onnxruntime-node;或用 --captcha-x 手动提供缺口位置" })

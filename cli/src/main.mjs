@@ -147,8 +147,27 @@ export function helpText(prefix = []) {
   return lines.join("\n")
 }
 
+function buildTrace(startupMs) {
+  const reqs = stats.trace
+  const byHost = {}
+  for (const r of reqs) { const h = (byHost[r.host] ??= { count: 0, totalMs: 0, maxMs: 0 }); h.count++; h.totalMs += r.ms; h.maxMs = Math.max(h.maxMs, r.ms) }
+  const end = Math.round(performance.now())
+  return { processStartupMs: startupMs, totalMs: end, networkWallMs: unionMs(reqs), phases: stats.phases, requests: reqs, byHost }
+}
+
+function unionMs(reqs) {
+  const iv = reqs.map((r) => [r.startMs, r.startMs + r.ms]).sort((a, b) => a[0] - b[0])
+  let total = 0, cur = null
+  for (const [a, b] of iv) {
+    if (!cur || a > cur[1]) { if (cur) total += cur[1] - cur[0]; cur = [a, b] } else cur[1] = Math.max(cur[1], b)
+  }
+  if (cur) total += cur[1] - cur[0]
+  return total
+}
+
 export async function run(argv, env = process.env) {
   const started = Date.now()
+  const startupMs = Math.round(performance.now())
   const { path, flags } = parseArgv(argv)
   let g = {}, json = false, pretty = false, commandName = null
   const emit = (obj, human, exitCode, toErr = false) => {
@@ -165,6 +184,9 @@ export async function run(argv, env = process.env) {
     httpOptions.retries = Math.max(0, Math.floor(g.retries ?? 2))
     if (g.timeout !== undefined) httpOptions.timeoutMs = g.timeout
     httpOptions.verbose = !!g.verbose
+    httpOptions.trace = !!g.trace
+    if (g["hedge-ms"] !== undefined) httpOptions.hedgeMs = Math.max(0, Number(g["hedge-ms"]) || 0)
+    if (httpOptions.trace) { stats.trace = []; stats.phases = [] }
     applyClientPreferences()
 
     if (path.length === 0 || path[0] === "help") {
@@ -207,6 +229,8 @@ export async function run(argv, env = process.env) {
 
     let data = await cmd.run(ctx)
     const meta = { durationMs: Date.now() - started, httpRequests: stats.requests, retries: stats.retries }
+    if (stats.hedged) meta.hedged = stats.hedged
+    if (httpOptions.trace) meta.trace = buildTrace(startupMs)
     if (Array.isArray(data) && (cmd.paged || g.limit !== undefined || g.offset)) {
       const r = paginate(data, g.offset, g.limit)
       data = r.items; meta.page = r.page

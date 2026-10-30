@@ -1,6 +1,7 @@
 import crypto from "node:crypto"
 import { CxError, scrubString } from "./errors.mjs"
-import { checkResponse, request, unwrapJsonp } from "./http.mjs"
+import { checkResponse, request, unwrapJsonp, phase } from "./http.mjs"
+import { load, markDirty } from "./store.mjs"
 import { buildFaceResult, md5, resolveImPassword } from "./cxcrypto.mjs"
 
 
@@ -13,7 +14,7 @@ function sessionExpired(client, data) {
 }
 
 export async function courseListJson(client) {
-  const res = await client.req({ url: URL_COURSE_LIST })
+  const res = await client.req({ url: URL_COURSE_LIST, hedge: true })
   if (res.status === 403) throw sessionExpired(client)
   checkResponse(res)
   let j
@@ -45,12 +46,45 @@ export function parseCourseList(channelList) {
 }
 
 export async function getAllCourses(client) {
-  return parseCourseList((await courseListJson(client)).channelList)
+  const j = await courseListJson(client)
+  rememberClassIds(client, j.channelList)
+  return parseCourseList(j.channelList)
 }
 
 export async function checkClassValid(client, classId) {
   try {
     const j = await courseListJson(client)
+    return j.channelList.some((c) => Number(c?.content?.id) === Number(classId))
+  } catch (e) {
+    if (e.code === "AUTH_SESSION_EXPIRED") return null
+    throw e
+  }
+}
+
+export const CLASS_CACHE_TTL_MS = 12 * 60 * 60 * 1000
+
+function classCacheKey(client) { return `${client.phone ?? ""}:${client.puid ?? ""}` }
+
+export function cachedClassIds(client, now = Date.now()) {
+  const e = load().speedCache?.classMembers?.[classCacheKey(client)]
+  if (!e || !Array.isArray(e.classIds) || now - e.at > CLASS_CACHE_TTL_MS || now < e.at) return null
+  return e.classIds
+}
+
+export function rememberClassIds(client, channelList, now = Date.now()) {
+  const st = load()
+  const classIds = channelList.map((c) => Number(c?.content?.id)).filter((x) => Number.isFinite(x) && x > 0)
+  st.speedCache = st.speedCache ?? {}
+  st.speedCache.classMembers = { ...(st.speedCache.classMembers ?? {}), [classCacheKey(client)]: { at: now, classIds } }
+  markDirty()
+}
+
+export async function isClassMember(client, classId) {
+  const ids = cachedClassIds(client)
+  if (ids && ids.includes(Number(classId))) return true
+  try {
+    const j = await courseListJson(client)
+    rememberClassIds(client, j.channelList)
     return j.channelList.some((c) => Number(c?.content?.id) === Number(classId))
   } catch (e) {
     if (e.code === "AUTH_SESSION_EXPIRED") return null
@@ -64,7 +98,7 @@ export async function getCourseIdFromClassId(client, classId) {
 }
 
 export async function queryClassName(client, classId) {
-  const res = await client.req({ url: URL_CLASS_NAME, query: { id: classId } })
+  const res = await client.req({ url: URL_CLASS_NAME, query: { id: classId }, hedge: true })
   checkResponse(res)
   return res.json()?.data?.[0]?.name ?? null
 }
@@ -79,7 +113,7 @@ export const SIGN_TYPE_NAMES = { photo: "拍照/普通签到", qrcode: "二维�
 export const ATYPE_NAME_TO_TYPE = { 密码签到: "password", 签到码签到: "password", 位置签到: "location", 二维码签到: "qrcode", 拍照签到: "photo", 手势签到: "gesture" }
 
 async function activityListJson(client, classId, courseId) {
-  const res = await client.req({ url: URL_ACTIVITY_LOAD, query: { courseId, classId } })
+  const res = await client.req({ url: URL_ACTIVITY_LOAD, query: { courseId, classId }, hedge: true })
   if (res.status === 403) throw sessionExpired(client)
   checkResponse(res)
   let full
@@ -145,7 +179,7 @@ export function checkAlreadySign(body) {
 export const checkExpiredSign = (body) => body.includes("下次早点哦")
 
 export async function getSignInfo(client, activeId) {
-  const res = await client.req({ url: URL_SIGN_INFO, query: { activeId } })
+  const res = await client.req({ url: URL_SIGN_INFO, query: { activeId }, hedge: true })
   checkResponse(res)
   const j = res.json()
   if (!j?.data) throw new CxError("DATA_NOT_FOUND", "获取签到活动信息失败,请确认活动 ID 是否正确", { activeId, result: j?.result, msg: j?.msg ?? j?.errorMsg })
@@ -215,15 +249,19 @@ export class Signer {
     return u.toString()
   }
 
-  async getSignInfo() {
-    if (!this.info) this.info = await getSignInfo(this.client, this.activeId)
+  getSignInfo() {
+    if (!this.info) {
+      this.info = getSignInfo(this.client, this.activeId)
+      this.info.catch(() => { this.info = null })
+    }
     return this.info
   }
 
   async preSign() {
-    const send = () => this.client.req({ method: "POST", url: this.preSignUrl(), form: `ext=${this.ext}` })
+    const send = () => this.client.req({ method: "POST", url: this.preSignUrl(), form: `ext=${this.ext}`, idempotent: true })
     let res = await send()
     if (res.status === 403) {
+      this.relogged = true
       await this.client.relogin().catch((e) => { throw e.code ? e : sessionExpired(this.client) })
       res = await send()
       if (res.status === 403) throw sessionExpired(this.client)
@@ -246,10 +284,14 @@ export class Signer {
   }
 
   async checkSignStatus() {
-    const st = await this.preSign()
+    const classCheck = phase("classCheck", () => isClassMember(this.client, this.classId))
+    classCheck.catch(() => {})
+    const st = await phase("preSign", () => this.preSign())
     if (st === "EXPIRED") throw new CxError("SIGN_EXPIRED", "签到已截止")
     if (st === "ALREADY_SIGNED") throw new CxError("SIGN_ALREADY_SIGNED", "重复签到", { predicted: true })
-    if ((await checkClassValid(this.client, this.classId)) === false) throw new CxError("SIGN_NO_PERMISSION", "此用户不在班级")
+    let isMember = await classCheck
+    if (isMember === null && this.relogged) isMember = await isClassMember(this.client, this.classId)
+    if (isMember === false) throw new CxError("SIGN_NO_PERMISSION", "此用户不在班级")
     return st
   }
 
@@ -525,7 +567,7 @@ export function parseLessons(lessonArray, sectionTimes) {
 }
 
 export async function fetchLessons(client) {
-  const res = await client.req({ url: URL_MY_LESSONS, query: { curTime: Date.now() } })
+  const res = await client.req({ url: URL_MY_LESSONS, query: { curTime: Date.now() }, hedge: true })
   checkResponse(res)
   let j
   try { j = JSON.parse(res.text) } catch { throw new CxError("BACKEND_PROTOCOL_ERROR", "课表数据解析失败") }

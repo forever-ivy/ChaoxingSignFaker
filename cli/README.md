@@ -36,3 +36,12 @@ cxsign im mute --group <id> --confirm                   # 永久不监听;im unm
 ```
 
 stdout 每行一个 JSON 事件(`connected`/`ready`/`sign`/`disconnected`/`reconnected`/`auto-sign`/`stopped`)。最后一行是标准 envelope。
+
+## 速度与耗时分析
+
+- `--trace`:在 `meta.trace` 里输出耗时分解(进程启动、各阶段、每个请求的主机/路径/状态/耗时,不含查询参数和 cookie)。
+- 签到前的检查并行执行:`preSign → analysis → analysis2` 保持 App 的顺序,班级校验、活动信息、位置解析、签到码校验、人脸准备与它同时进行。
+- 班级成员关系缓存 12 小时(缓存里没有该班级时一定会重新查);地址转坐标结果缓存 30 天。
+- 只读 GET(课程列表、活动列表、活动信息、课表)超过 `--hedge-ms`(默认 2500ms)没响应会并发补发一次,取先返回的;签到请求和 POST 从不补发。
+- `activities available` 以 8 路并发扫描全部课程。
+- 带 `--captcha-auto` 时,滑块模型在签到检查期间就开始加载。

@@ -7,11 +7,11 @@ import { CLIENT_INFOS } from "./http.mjs"
 import { encryptByAES, randomizedDeviceCode } from "./cxcrypto.mjs"
 import { load, markDirty, stateDir, faceDir, writeSecretFile } from "./store.mjs"
 import { Client, selfClient, otherClient, resolveClient, ensureUser, applyClientPreferences, checkPassword, URL_LOGIN, buildLoginForm } from "./client.mjs"
-import { CookieSession, checkResponse, request } from "./http.mjs"
+import { CookieSession, checkResponse, request, phase } from "./http.mjs"
 import * as api from "./api.mjs"
 import * as geo from "./geo.mjs"
 import { watchIM, scanGroups, courseIndex } from "./imwatch.mjs"
-import { captchaModelStatus, predictSliderXOffset, decodeQRCodeImage } from "./image.mjs"
+import { captchaModelStatus, predictSliderXOffset, decodeQRCodeImage, warmCaptchaModel } from "./image.mjs"
 import { createRequire } from "node:module"
 const _req = createRequire(import.meta.url)
 const hasDep = (n) => { try { _req.resolve(n); return true } catch { return false } }
@@ -64,12 +64,33 @@ function locFromArgs(args) {
   return new api.SignLocation(...toSignCoord(args.lat, args.lon, args), args.address ?? "")
 }
 
-async function activityTarget(c, activeId) {
-  const raw = await api.getSignInfo(c, activeId)
+const quiet = (p) => { p?.catch?.(() => {}); return p }
+
+export const GEOCODE_CACHE_TTL_MS = 30 * 24 * 60 * 60 * 1000
+
+export async function cachedGeocode(text, cfg, lookup = geo.geocodeAddress, now = Date.now()) {
+  const st = load()
+  const key = `${cfg.baiduAk ? "baidu" : cfg.nominatimUrl || "osm"}|${text}`
+  const e = st.speedCache?.geocode?.[key]
+  if (e?.hit && now - e.at < GEOCODE_CACHE_TTL_MS && now >= e.at) return { ...e.hit, isCached: true }
+  const hit = await lookup(text, { cfg })
+  if (hit) {
+    st.speedCache = st.speedCache ?? {}
+    const g = { ...(st.speedCache.geocode ?? {}), [key]: { at: now, hit } }
+    const keys = Object.keys(g)
+    if (keys.length > 200) for (const k of keys.slice(0, keys.length - 200)) delete g[k]
+    st.speedCache.geocode = g
+    markDirty()
+  }
+  return hit
+}
+
+async function activityTarget(c, activeId, signer = null) {
+  const raw = signer ? await signer.getSignInfo() : await api.getSignInfo(c, activeId)
   let target = geo.resolveSignTarget(raw)
   if (!target && raw.ifopenAddress === 1 && raw.locationText) {
     try {
-      const hit = await geo.geocodeAddress(raw.locationText, { cfg: geoCfg() })
+      const hit = await phase("geocode", () => cachedGeocode(raw.locationText, geoCfg()))
       const r = { provider: hit?.provider }
       if (hit) {
         const radius = raw.locationRange === null || raw.locationRange === undefined || raw.locationRange === "" ? null : Number(raw.locationRange)
@@ -81,13 +102,13 @@ async function activityTarget(c, activeId) {
   return { raw, target }
 }
 
-async function resolveSignPosition(ctx, c) {
+async function resolveSignPosition(ctx, c, signer = null) {
   const a = ctx.args
   const explicit = locFromArgs(a)
   if (explicit && !a.auto) return { pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` }
   if (a.favorite && !a.auto) return { pos: findLocation(load(), a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` }
   if (a["no-auto"] !== true) {
-    const { target } = await activityTarget(c, a.active)
+    const { target } = await activityTarget(c, a.active, signer)
     if (target) return { pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? ""), source: "activity", reason: target.reason, target }
     if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
   }
@@ -182,6 +203,21 @@ async function readStdin() {
   const chunks = []
   for await (const c of process.stdin) chunks.push(c)
   return Buffer.concat(chunks).toString("utf8").replace(/\r?\n$/, "")
+}
+
+export const ACTIVITY_SCAN_CONCURRENCY = 8
+
+export async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const i = next++
+      results[i] = await fn(items[i], i)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
 }
 
 export const COMMANDS = [
@@ -315,14 +351,14 @@ export const COMMANDS = [
       return withRelogin(ctx, async (c) => {
         const courses = await api.getAllCourses(c)
         const out = []
-        for (const course of courses) {
+        await mapLimit(courses, ACTIVITY_SCAN_CONCURRENCY, async (course) => {
           try {
             const { activities } = await api.getActivities(c, course)
             for (const a of activities) if (a.isRecent) out.push({ ...a, courseName: course.courseName, teacher: course.teacher })
           } catch (e) {
             if (e.code === "AUTH_SESSION_EXPIRED") throw e
           }
-        }
+        })
         return out.sort((a, b) => (b.startTime ?? 0) - (a.startTime ?? 0))
       })
     },
@@ -356,8 +392,9 @@ export const COMMANDS = [
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
-        const status = await signer.preSign()
-        const info = api.describeSignInfo(await signer.getSignInfo())
+        const infoP = quiet(signer.getSignInfo())
+        const status = await phase("preSign", () => signer.preSign())
+        const info = api.describeSignInfo(await infoP)
         return { status, info }
       })
     },
@@ -378,11 +415,16 @@ export const COMMANDS = [
     },
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
-        const resolved = await resolveSignPosition(ctx, c)
-        const pos = resolved.pos
-        const face = await resolveFaceObjectId(c, ctx.args)
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
-        await signer.checkSignStatus()
+        locFromArgs(ctx.args)
+        if (ctx.args["captcha-auto"]) warmCaptchaModel()
+        const resolvedP = quiet(phase("position", () => resolveSignPosition(ctx, c, signer)))
+        const faceP = quiet(phase("face", () => resolveFaceObjectId(c, ctx.args)))
+        const statusP = quiet(signer.checkSignStatus())
+        const resolved = await resolvedP
+        const pos = resolved.pos
+        const face = await faceP
+        await statusP
         await doSign(signer, (v) => signer.signLocation(pos, { validate: v, faceObjectId: face }), ctx.args)
         bumpAnalysis("locationSign")
         if (!c.isSelf) bumpAnalysis("otherUserSign")
@@ -401,8 +443,10 @@ export const COMMANDS = [
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
+        if (ctx.args["captcha-auto"]) warmCaptchaModel()
+        const codeP = ctx.args["skip-check"] ? null : quiet(phase("checkSignCode", () => api.checkSignCode(c, ctx.args.active, ctx.args.code)))
         await signer.checkSignStatus()
-        if (!ctx.args["skip-check"] && !(await api.checkSignCode(c, ctx.args.active, ctx.args.code))) throw new CxError("SIGN_CODE_INCORRECT", "签到码错误")
+        if (codeP && !(await codeP)) throw new CxError("SIGN_CODE_INCORRECT", "签到码错误")
         const pos = locFromArgs(ctx.args)
         await doSign(signer, (v) => signer.signCode(ctx.args.code, pos, { validate: v }), ctx.args)
         bumpAnalysis("passwordSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
@@ -421,8 +465,10 @@ export const COMMANDS = [
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
+        if (ctx.args["captcha-auto"]) warmCaptchaModel()
+        const codeP = ctx.args["skip-check"] ? null : quiet(phase("checkSignCode", () => api.checkSignCode(c, ctx.args.active, ctx.args.code)))
         await signer.checkSignStatus()
-        if (!ctx.args["skip-check"] && !(await api.checkSignCode(c, ctx.args.active, ctx.args.code))) throw new CxError("SIGN_CODE_INCORRECT", "手势不正确")
+        if (codeP && !(await codeP)) throw new CxError("SIGN_CODE_INCORRECT", "手势不正确")
         const pos = locFromArgs(ctx.args)
         await doSign(signer, (v) => signer.signCode(ctx.args.code, pos, { validate: v }), ctx.args)
         bumpAnalysis("gestureSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
@@ -441,8 +487,10 @@ export const COMMANDS = [
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
+        if (ctx.args["captcha-auto"]) warmCaptchaModel()
+        const infoP = quiet(signer.getSignInfo())
         await signer.checkSignStatus()
-        const info = await signer.getSignInfo()
+        const info = await infoP
         let objectId = ctx.args["object-id"] ?? null
         if (info.ifphoto === 1 && !objectId) {
           if (!ctx.args.image) throw usage("该活动需要拍照,请用 --image <路径>")
@@ -479,14 +527,15 @@ export const COMMANDS = [
           if (!courseId) courseId = await api.getCourseIdFromClassId(c, classId) ?? 0
         }
         const signer = new api.Signer(c, { activeId: parsed.aid, classId, courseId, ext: ctx.args.ext ?? "" })
-        if (!ctx.args["skip-expire-check"]) {
-          const exp = await signer.isQRCodeExpired(parsed)
-          if (exp === true) throw new CxError("SIGN_QRCODE_EXPIRED", "二维码已过期")
-        }
-        await signer.checkSignStatus()
+        if (ctx.args["captcha-auto"]) warmCaptchaModel()
+        const expP = ctx.args["skip-expire-check"] ? null : quiet(phase("qrExpireCheck", () => signer.isQRCodeExpired(parsed)))
+        const statusP = quiet(signer.checkSignStatus())
+        const faceP = quiet(phase("face", () => resolveFaceObjectId(c, ctx.args)))
+        if (expP && (await expP) === true) throw new CxError("SIGN_QRCODE_EXPIRED", "二维码已过期")
+        await statusP
         let pos = locFromArgs(ctx.args)
         if (!pos && ctx.args.favorite) pos = findLocation(load(), ctx.args.favorite)
-        const face = await resolveFaceObjectId(c, ctx.args)
+        const face = await faceP
         await doSign(signer, (v) => signer.signQRCode(parsed, pos, { validate: v, faceObjectId: face }), ctx.args)
         bumpAnalysis("qrcodeSign"); if (!c.isSelf) bumpAnalysis("otherUserSign")
         return { signed: true, type: "qrcode", activeId: parsed.aid, classId, courseId }
