@@ -184,15 +184,19 @@ export async function run(argv, env = process.env) {
       throw new CxError("USAGE", `未知命令: ${path.join(" ")}`, { suggestions: near.length ? near : undefined, hint: "cxsign --help 或 cxsign schema" })
     }
     commandName = cmd.name
+    if ((cmd.args ?? []).some((a) => a.name === "timeout") && flags.timeout !== undefined) {
+      httpOptions.timeoutMs = Number(env.CXSIGN_TIMEOUT_MS) || 15000
+      g.timeout = undefined
+    }
     if (rest.length) throw new CxError("USAGE", `多余的位置参数: ${rest.join(" ")}(所有参数都用 --name value 传入)`)
     const known = new Set([...(cmd.args ?? []).map((a) => a.name), ...GLOBAL_FLAGS.map((a) => a.name)])
     const unknown = Object.keys(flags).filter((k) => !known.has(k))
     if (unknown.length) throw new CxError("USAGE", `未知参数: ${unknown.map((k) => "--" + k).join(" ")}`, { allowed: [...(cmd.args ?? []).map((a) => a.name)] })
     const args = resolveArgs(cmd.args ?? [], flags, env)
-    const ctx = { args, global: g, flags }
+    const ctx = { args, global: g, flags, env }
 
     if (cmd.sideEffect && (!g.confirm || g["dry-run"])) {
-      const plan = { command: cmd.name, ...(cmd.plan ? cmd.plan(ctx) : {}), args: scrub(args) }
+      const plan = { command: cmd.name, ...(cmd.plan ? await cmd.plan(ctx) : {}), args: scrub(args) }
       const payload = { ok: false, command: cmd.name, dryRun: true, plan, error: { code: "DRY_RUN", message: "有副作用的命令默认 dry-run;确认无误后加 --confirm 执行", exitCode: EXIT_CODES.DRY_RUN, retryable: false } }
       return emit(payload, `[dry-run] ${JSON.stringify(plan, null, 2)}\n加 --confirm 才会真正执行。`, EXIT_CODES.DRY_RUN)
     }

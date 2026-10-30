@@ -9,6 +9,8 @@ import { load, markDirty, stateDir, faceDir, writeSecretFile } from "./store.mjs
 import { Client, selfClient, otherClient, resolveClient, ensureUser, applyClientPreferences, checkPassword, URL_LOGIN, buildLoginForm } from "./client.mjs"
 import { CookieSession, checkResponse, request } from "./http.mjs"
 import * as api from "./api.mjs"
+import * as geo from "./geo.mjs"
+import { watchIM } from "./imwatch.mjs"
 import { captchaModelStatus, predictSliderXOffset, decodeQRCodeImage } from "./image.mjs"
 import { createRequire } from "node:module"
 const _req = createRequire(import.meta.url)
@@ -17,6 +19,16 @@ const hasDep = (n) => { try { _req.resolve(n); return true } catch { return fals
 const s = (name, description, extra = {}) => ({ name, type: "string", description, ...extra })
 const n = (name, description, extra = {}) => ({ name, type: "number", description, ...extra })
 const b = (name, description, extra = {}) => ({ name, type: "boolean", description, ...extra })
+
+async function autoSignEvent(ctx, ev) {
+  const argv = ["sign", ev.signType, "--active", String(ev.activeId), "--class", String(ev.classId), "--course", String(ev.courseId), "--confirm", "--json"]
+  if (ev.signType === "location") argv.push("--auto")
+  else if (ev.signType !== "photo") return { skipped: true, reason: `${ev.signType} 签到需要签到码/二维码/手势,无法自动完成` }
+  if (ctx.global?.as) argv.push("--as", String(ctx.global.as))
+  const { run } = await import("./main.mjs")
+  const r = await run(argv, ctx.env ?? process.env)
+  try { return JSON.parse(r.stdout) } catch { return { ok: r.exitCode === 0, exitCode: r.exitCode } }
+}
 
 async function clientOf(ctx) {
   applyClientPreferences()
@@ -35,16 +47,72 @@ async function withRelogin(ctx, fn) {
   }
 }
 
+function toSignCoord(lat, lon, args) {
+  const p = geo.convert(lat, lon, args.coord ?? geo.SIGN_COORD_SYSTEM, geo.SIGN_COORD_SYSTEM)
+  return [geo.round6(p.lat), geo.round6(p.lon)]
+}
+
 function locFromArgs(args) {
-  if (args.lat === undefined && args.lon === undefined && !args.address && !args.location) return null
+  if (args.lat === undefined && args.lon === undefined && !args.location) return null
   if (args.location) {
     const [a, b, ...rest] = String(args.location).split(",")
     const lat = Number(a), lon = Number(b)
     if (!Number.isFinite(lat) || !Number.isFinite(lon)) throw usage("--location 格式: lat,lon[,address]")
-    return new api.SignLocation(lat, lon, rest.join(",") || args.address || "")
+    return new api.SignLocation(...toSignCoord(lat, lon, args), rest.join(",") || args.address || "")
   }
   if (args.lat === undefined || args.lon === undefined) throw usage("位置签到需要 --lat 与 --lon(或 --location)")
-  return new api.SignLocation(args.lat, args.lon, args.address ?? "")
+  return new api.SignLocation(...toSignCoord(args.lat, args.lon, args), args.address ?? "")
+}
+
+async function activityTarget(c, activeId) {
+  const raw = await api.getSignInfo(c, activeId)
+  let target = geo.resolveSignTarget(raw)
+  if (!target && raw.ifopenAddress === 1 && raw.locationText) {
+    try {
+      const hit = await geo.geocodeAddress(raw.locationText, { cfg: geoCfg() })
+      const r = { provider: hit?.provider }
+      if (hit) {
+        const radius = raw.locationRange === null || raw.locationRange === undefined || raw.locationRange === "" ? null : Number(raw.locationRange)
+        target = { latitude: hit.latitude, longitude: hit.longitude, radius, address: raw.locationText, coordSystem: geo.SIGN_COORD_SYSTEM, source: "locationText", method: "geocoded-address",
+          provider: r.provider, geocodeQuery: hit.query, isApproximate: true, reason: `接口没返回中心坐标,只给了地址和半径 ${radius ?? "?"} 米;用 ${r.provider} 把地址解析为坐标(近似,建议核对)` }
+      }
+    } catch {}
+  }
+  return { raw, target }
+}
+
+async function resolveSignPosition(ctx, c) {
+  const a = ctx.args
+  const explicit = locFromArgs(a)
+  if (explicit && !a.auto) return { pos: explicit, source: "args", reason: `使用命令行给出的坐标(输入坐标系 ${a.coord ?? geo.SIGN_COORD_SYSTEM},已转为 ${geo.SIGN_COORD_SYSTEM})` }
+  if (a.favorite && !a.auto) return { pos: findLocation(load(), a.favorite), source: "favorite", reason: `使用收藏位置 ${a.favorite}` }
+  if (a["no-auto"] !== true) {
+    const { target } = await activityTarget(c, a.active)
+    if (target) return { pos: new api.SignLocation(target.latitude, target.longitude, a.address ?? target.address ?? ""), source: "activity", reason: target.reason, target }
+    if (a.auto) throw notFound("该活动没有设置签到位置/范围,无法 --auto", { next: "改用 --lat/--lon 或 --favorite" })
+  }
+  const rem = load().classSelectedLocation[String(a.class)] ?? load().classRememberedLocation[String(a.class)]
+  if (rem) return { pos: new api.SignLocation(rem.latitude, rem.longitude, rem.address), source: "remembered", reason: "活动未限定位置,使用该班级记住的位置" }
+  throw usage("位置签到需要 --lat/--lon、--location、--favorite,或活动本身设置了位置(--auto)")
+}
+
+function describePos(r) {
+  return { latitude: r.pos.latitude, longitude: r.pos.longitude, address: r.pos.address, coordSystem: geo.SIGN_COORD_SYSTEM, source: r.source, reason: r.reason, radius: r.target?.radius ?? null, method: r.target?.method ?? null, randomJitterDeg: r.pos.range }
+}
+
+function geoCfg() { const p = load().preferences ?? {}; return { baiduAk: p.baiduAk || "", nominatimUrl: p.nominatimUrl || "" } }
+
+async function locationFromAddArgs(ctx) {
+  const a = ctx.args
+  if (a.search) {
+    const r = await geo.searchPlaces(a.search, { city: a.city, limit: Math.max(10, (a.pick ?? 0) + 1), env: ctx.env ?? process.env, cfg: geoCfg() })
+    const hit = r.results[a.pick ?? 0]
+    if (!hit) throw notFound(`检索 "${a.search}" 没有第 ${a.pick ?? 0} 个结果`)
+    return { latitude: hit.latitude, longitude: hit.longitude, address: a.address ?? hit.name ?? hit.address, provider: r.provider, coordSystem: geo.SIGN_COORD_SYSTEM }
+  }
+  if (a.lat === undefined || a.lon === undefined) throw usage("需要 --lat/--lon 或 --search")
+  const [lat, lon] = toSignCoord(a.lat, a.lon, a)
+  return { latitude: lat, longitude: lon, address: a.address ?? "", coordSystem: geo.SIGN_COORD_SYSTEM }
 }
 
 function findLocation(st, label) {
@@ -267,6 +335,22 @@ export const COMMANDS = [
     },
   },
   {
+    name: "activity location", summary: "查看位置签到的目标点、半径、地址和推荐签到坐标(范围取中点)", auth: true,
+    args: [n("active", "活动 ID", { required: true })],
+    async run(ctx) {
+      return withRelogin(ctx, async (c) => {
+        const { raw, target } = await activityTarget(c, ctx.args.active)
+        const info = api.describeSignInfo(raw)
+        return {
+          activeId: Number(ctx.args.active), signType: info.signType, isPositionRequired: info.requirements.position,
+          coordSystem: geo.SIGN_COORD_SYSTEM, hasTarget: !!target,
+          target: target ? { latitude: target.latitude, longitude: target.longitude, radius: target.radius, address: target.address, method: target.method, source: target.source, reason: target.reason, points: target.points ?? null, isApproximate: !!target.isApproximate, geocodeQuery: target.geocodeQuery ?? null } : null,
+          rawFields: Object.fromEntries(Object.entries(raw).filter(([k]) => /^location|address|ifopenAddress|range|polygon|points/i.test(k))),
+        }
+      })
+    },
+  },
+  {
     name: "activity presign", summary: "执行 preSign + analysis,返回签到状态(不真正签到)", auth: true,
     args: [n("active", "活动 ID", { required: true }), n("class", "班级 ID", { required: true }), n("course", "课程 ID", { required: true }), s("ext", "活动列表返回的 ext JSON(可选)")],
     async run(ctx) {
@@ -284,26 +368,25 @@ export const COMMANDS = [
     args: [
       n("active", "活动 ID", { required: true }), n("class", "班级 ID", { required: true }), n("course", "课程 ID", { required: true }),
       s("ext", "ext JSON"), n("lat", "纬度"), n("lon", "经度"), s("address", "地址描述"), s("location", "lat,lon[,address]"),
+      s("coord", "--lat/--lon 的坐标系 bd09|gcj02|wgs84(默认 bd09,签到接口用 bd09)"), b("auto", "强制使用活动设置的位置(范围取中点/质心)"), b("no-auto", "不读取活动设置的位置"),
       s("favorite", "使用收藏位置的 label"), s("face-object", "人脸照片 objectId"), s("face-file", "上传本地人脸照片"), n("face-index", "使用已保存的第 N 张人脸"),
       b("captcha-auto", "自动识别滑块"), n("captcha-x", "手动提供缺口像素位置"), s("validate", "已有的 validate 字符串"),
     ],
-    plan: (ctx) => ({ active: ctx.args.active, class: ctx.args.class, course: ctx.args.course, location: ctx.args.location ?? (ctx.args.lat !== undefined ? `${ctx.args.lat},${ctx.args.lon}` : ctx.args.favorite), face: ctx.args["face-object"] ?? ctx.args["face-file"] ?? ctx.args["face-index"] }),
+    plan: async (ctx) => {
+      const base = { active: ctx.args.active, class: ctx.args.class, course: ctx.args.course, face: ctx.args["face-object"] ?? ctx.args["face-file"] ?? ctx.args["face-index"] }
+      try { return { ...base, position: describePos(await withRelogin(ctx, (c) => resolveSignPosition(ctx, c))) } } catch (e) { return { ...base, position: null, positionError: { code: e.code ?? "UNKNOWN", message: e.message } } }
+    },
     async run(ctx) {
       return withRelogin(ctx, async (c) => {
-        let pos = locFromArgs(ctx.args)
-        if (!pos && ctx.args.favorite) pos = findLocation(load(), ctx.args.favorite)
-        if (!pos) {
-          const rem = load().classSelectedLocation[String(ctx.args.class)] ?? load().classRememberedLocation[String(ctx.args.class)]
-          if (rem) pos = new api.SignLocation(rem.latitude, rem.longitude, rem.address)
-        }
-        if (!pos) throw usage("位置签到需要 --lat/--lon 或 --location 或 --favorite")
+        const resolved = await resolveSignPosition(ctx, c)
+        const pos = resolved.pos
         const face = await resolveFaceObjectId(c, ctx.args)
         const signer = new api.Signer(c, { activeId: ctx.args.active, classId: ctx.args.class, courseId: ctx.args.course, ext: ctx.args.ext ?? "" })
         await signer.checkSignStatus()
         await doSign(signer, (v) => signer.signLocation(pos, { validate: v, faceObjectId: face }), ctx.args)
         bumpAnalysis("locationSign")
         if (!c.isSelf) bumpAnalysis("otherUserSign")
-        return { signed: true, type: "location", activeId: Number(ctx.args.active), latitude: pos.randomizedLatitude, longitude: pos.randomizedLongitude, address: pos.address }
+        return { signed: true, type: "location", activeId: Number(ctx.args.active), latitude: pos.randomizedLatitude, longitude: pos.randomizedLongitude, address: pos.address, position: describePos(resolved) }
       })
     },
   },
@@ -641,6 +724,18 @@ export const COMMANDS = [
   },
 
   {
+    name: "im watch", summary: "常驻监听群聊里新发布的签到(NDJSON 事件流)", auth: true, stream: true,
+    args: [n("interval", "轮询间隔秒", { default: 15 }), n("timeout", "运行多少秒后退出(默认一直运行;此命令里 --timeout 单位是秒,HTTP 超时改用 CXSIGN_TIMEOUT_MS)"), b("once", "收到第一个新签到事件后退出"),
+      b("include-existing", "启动时把已有的签到也作为事件输出"), s("group", "只监听某个群 ID"), n("max-groups", "最多监听几个群", { default: 50 }),
+      s("notify-cmd", "每个事件执行的命令(事件 JSON 通过 stdin 和 CXSIGN_EVENT 环境变量传入)"),
+      b("auto-sign", "收到事件后自动签到(必须同时 --confirm,默认关闭;位置签到用活动设置的位置)")],
+    async run(ctx) {
+      if (ctx.args["auto-sign"] && !ctx.global?.confirm) throw usage("--auto-sign 必须同时加 --confirm 才会生效", { hint: "默认只监听不签到" })
+      const c = await clientOf(ctx)
+      return watchIM(ctx, c, { autoSign: ctx.args["auto-sign"] && ctx.global?.confirm ? (ev) => autoSignEvent(ctx, ev) : null })
+    },
+  },
+  {
     name: "users list", summary: "列出代签用户", auth: false, paged: true,
     async run() {
       const tags = Object.fromEntries(load().tagsLibrary.map((t) => [t.id, t]))
@@ -804,15 +899,39 @@ export const COMMANDS = [
     async run() { return load().locations },
   },
   {
-    name: "locations add", summary: "添加收藏位置", auth: false, sideEffect: true,
-    args: [s("label", "名称", { required: true }), n("lat", "纬度", { required: true }), n("lon", "经度", { required: true }), s("address", "地址描述", { default: "" })],
-    plan: (ctx) => ({ label: ctx.args.label, lat: ctx.args.lat, lon: ctx.args.lon }),
+    name: "locations add", summary: "添加收藏位置(可直接取 locations search 的结果)", auth: false, sideEffect: true,
+    args: [s("label", "名称", { required: true }), n("lat", "纬度"), n("lon", "经度"), s("coord", "--lat/--lon 的坐标系(默认 bd09)"), s("address", "地址描述"),
+      s("search", "用关键词检索并取结果"), s("city", "检索城市"), n("pick", "取第 N 个检索结果(从 0 开始)", { default: 0 })],
+    plan: async (ctx) => { try { return { label: ctx.args.label, location: await locationFromAddArgs(ctx) } } catch (e) { return { label: ctx.args.label, location: null, error: e.message } } },
     async run(ctx) {
       const st = load()
       if (st.locations.some((l) => l.label === ctx.args.label)) throw usage("已存在同名位置")
-      const loc = { label: ctx.args.label, latitude: Number(ctx.args.lat), longitude: Number(ctx.args.lon), address: ctx.args.address ?? "" }
+      const p = await locationFromAddArgs(ctx)
+      const loc = { label: ctx.args.label, latitude: p.latitude, longitude: p.longitude, address: p.address ?? "" }
       st.locations.push(loc); markDirty()
       return loc
+    },
+  },
+  {
+    name: "locations search", summary: "地图选点:地址/POI 关键词转坐标(输出签到用的 bd09)", auth: false, paged: true,
+    args: [s("keyword", "关键词", { required: true }), s("city", "城市"), n("max", "最多返回条数", { default: 10 })],
+    async run(ctx) {
+      const r = await geo.searchPlaces(ctx.args.keyword, { city: ctx.args.city, limit: ctx.args.max ?? 10, env: ctx.env ?? process.env, cfg: geoCfg() })
+      return r.results.map((x, i) => ({ index: i, provider: r.provider, ...x }))
+    },
+  },
+  {
+    name: "locations reverse", summary: "坐标转地址(逆地理编码)", auth: false,
+    args: [n("lat", "纬度", { required: true }), n("lon", "经度", { required: true }), s("coord", "输入坐标系(默认 bd09)")],
+    async run(ctx) { return geo.reverseGeocode(ctx.args.lat, ctx.args.lon, { from: ctx.args.coord ?? geo.SIGN_COORD_SYSTEM, env: ctx.env ?? process.env, cfg: geoCfg() }) },
+  },
+  {
+    name: "locations convert", summary: "坐标系转换 bd09/gcj02/wgs84", auth: false,
+    args: [n("lat", "纬度", { required: true }), n("lon", "经度", { required: true }), s("from", "源坐标系", { required: true }), s("to", "目标坐标系", { default: "bd09" })],
+    async run(ctx) {
+      const from = geo.normalizeSystem(ctx.args.from), to = geo.normalizeSystem(ctx.args.to ?? "bd09")
+      const p = geo.convert(ctx.args.lat, ctx.args.lon, from, to)
+      return { from, to, input: { latitude: ctx.args.lat, longitude: ctx.args.lon }, latitude: geo.round6(p.lat), longitude: geo.round6(p.lon) }
     },
   },
   {

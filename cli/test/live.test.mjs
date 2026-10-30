@@ -19,6 +19,15 @@ function statsReset() {
 }
 
 describe("live read-only", () => {
+  it("locations search 燕山大学", async () => {
+    const r = await live(["locations", "search", "--keyword", "燕山大学", "--city", "秦皇岛"])
+    if (r.exitCode === 5 || r.exitCode === 6) return
+    assert.equal(r.exitCode, 0, r.stdout + r.stderr)
+    const d = JSON.parse(r.stdout).data
+    assert.ok(d.length > 0)
+    assert.equal(d[0].coordSystem, "bd09")
+    assert.ok(Math.abs(d[0].latitude - 39.91) < 0.1 && Math.abs(d[0].longitude - 119.54) < 0.1)
+  })
   it("rank summary", async () => {
     const r = await live(["rank", "summary"])
     if (r.exitCode === 5) return

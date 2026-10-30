@@ -45,8 +45,8 @@ cd cli && npm install          # 装 onnxruntime-node / jsqr / jpeg-js / pngjs
 | 用户资料 | `user info` |
 | 课程列表 | `courses list` |
 | 签到活动列表 / 近期可签 | `activities list` · `activities available` |
-| 活动详情 / preSign 状态 | `activity info` · `activity presign` |
-| 位置签到 | `sign location --lat --lon [--favorite] [--face-*] [--captcha-*]` |
+| 活动详情 / preSign 状态 | `activity info` · `activity presign` · `activity location`(目标点/半径/地址) |
+| 位置签到 | `sign location [--auto] [--lat --lon --coord] [--favorite] [--face-*] [--captcha-*]` |
 | 签到码 / 手势 | `sign password --code` · `sign gesture --code` · `sign-code check` |
 | 拍照 / 普通签到 | `sign photo [--image]` |
 | 二维码签到 | `sign qrcode --qr` · `qrcode parse` · `qrcode from-image` · `qrcode check-expired` |
@@ -54,13 +54,33 @@ cd cli && npm install          # 装 onnxruntime-node / jsqr / jpeg-js / pngjs
 | 云盘上传 | `cloud upload --file` |
 | 人脸 | `face profile` · `face list` · `face add` · `face remove` |
 | 课表 | `schedule refresh` · `schedule list` · `schedule current` · `schedule recommend` |
-| 群聊签到发现 | `im groups` · `im signs` |
+| 群聊签到发现 / 实时监听 | `im groups` · `im signs` · `im watch` |
 | 代签用户 | `users list` · `users add` · `users import` · `users share --out` · `users remove` · `users relogin` · `users tag` |
-| 收藏位置 | `locations list` · `locations add` · `locations remove` · `locations remember` |
+| 收藏位置 / 地图选点 | `locations list` · `locations add [--search]` · `locations remove` · `locations remember` · `locations search` · `locations reverse` · `locations convert` |
 | 设备码 | `device-code show` · `device-code reset` |
 | 公开排行榜 | `rank summary` · `rank top` · `rank me` · `rank upload` |
 | 封禁名单 / 捐赠 | `banlist` · `sponsors` |
 | 配置 / 统计 | `config get` · `config set` · `stats` · `capabilities` |
+
+## 位置:目标点与范围取中
+
+- 签到接口和 App 内地图都使用 **BD-09(bd09ll)**。CLI 所有输出坐标都是 bd09;`--coord gcj02|wgs84` 可让输入自动转换。
+- `sign location` 选点顺序:`--lat/--lon/--location` → `--favorite` → **活动设置的位置**(`--auto` 强制,`--no-auto` 关闭)→ 班级记住的位置。dry-run 的 `plan.position` 给出选中的点和 `reason`。
+- 活动位置解析(`getPPTActiveInfo`):
+  1. `locationRange`/`locationArea`/`locationPoints`/`locationPolygon` 等若是两点或 min/max → 取**中点**;多边形 → 取**面积质心**。
+  2. `locationLatitude/locationLongitude`(bd09)+ `locationRange`(半径米) → 取**中心点**。
+  3. 只有 `locationLatitude_gd/_gd`(高德 gcj02) → 转为 bd09 后取中心点。
+  4. 坐标为空但 `ifopenAddress=1` 且有 `locationText` → 地理编码该地址(`isApproximate: true`,请核对)。
+- 实际提交时仍和 App 一样加 ±0.00005° 随机抖动(半径 100 米内约 ±5 米)。
+- 地理编码:设置 `CXSIGN_BAIDU_AK`(百度 Web 服务 ak)则用百度地点检索;否则用 OpenStreetMap Nominatim(WGS-84 → bd09),可用 `CXSIGN_NOMINATIM_URL` 换自建实例。App 内嵌的百度 ak 是 Android SDK 专用,Web API 返回 240,不可用。
+
+## 群聊实时监听 `im watch`
+
+- 用 App 同样的环信 token 接口登录,周期拉取各课程群的 messageroaming(默认 15 秒,`--interval`),解析签到附件,**每个新签到输出一行 NDJSON** `{"type":"sign",...}`;另有 `connected`/`ready`/`disconnected`/`reconnected`/`stopped` 事件。断线指数退避重连(2s 起,最长 5 分钟),401 自动重取 token。
+- `--timeout <秒>` 到时退出(此命令里单位是秒),`--once` 收到第一条新签到即退出,`--include-existing` 把启动时已有的签到也输出。
+- `--notify-cmd '<shell>'`:每个事件执行一次,事件 JSON 走 stdin 和 `CXSIGN_EVENT`。
+- `--auto-sign` 默认关闭,**必须同时 `--confirm`**;只会自动做普通签到和位置签到(`--auto` 选点),其余类型输出 skipped。
+- App 用原生环信 SDK 的长连接推送;Node 侧没有官方 SDK,CLI 以轮询漫游消息实现,延迟约等于 `--interval`。
 
 ## 典型流程
 
